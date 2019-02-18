@@ -1,42 +1,68 @@
-import json
 import argparse
-import os, shutil
+import json
+import os
+import shutil
+
 import otf2
-import time
+
+TIMER_GRANULARITY = 1000000  # chrome traces uses micro seconds
+
 
 def convertTrace(input, output):
     if not input:
-      raise Exception("No chrome trace found")
+        raise Exception("No chrome trace found")
+    if not output:
+        raise Exception("No output trace")
 
     process_map = {}
     function_map = {}
 
     with open(input) as json_file:
         chrome_data = json.load(json_file)
-        with otf2.writer.open(output, timer_resolution=TIMER_GRANULARITY) as otf2_trace: # TODO definitions=trace_reader.definitions
+        with otf2.writer.open(output,
+                              timer_resolution=TIMER_GRANULARITY) as otf2_trace:  # TODO definitions=trace_reader.definitions
             otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
             otf2_system_tree_node = otf2_trace.definitions.system_tree_node("myHost", parent=otf2_root_node)
-            otf2_location_group = otf2_trace.definitions.location_group("Master Process",
-                                                                        system_tree_parent=otf2_system_tree_node)
 
             for chrome_event in chrome_data['traceEvents']:
-                if chrome_event['ph'] == 'M' and chrome_event['name'] == 'process_name':
-                    otf2_thread = otf2_trace.event_writer("Main Thread", group=otf2_location_group)
-                    process_map[chrome_event['pid']] = otf2_thread
+                if chrome_event['ph'] == 'M' and chrome_event['name'] == 'process_name':  # Metadata Events
 
-                if chrome_event['ph'] == 'X' and chrome_event['cat'] == "Op":
+                    otf2_location_group = otf2_trace.definitions.location_group(chrome_event['args']['name'],
+                                                                                system_tree_parent=otf2_system_tree_node)
+
+                    process_map[chrome_event['pid']] = {'location': otf2_location_group, 'threads': [],
+                                                        'name': chrome_event['args']['name']}
+
+                elif chrome_event['ph'] == 'X' and chrome_event[
+                    'cat'] == "Op":  # Complete Events, TensorFlow does not use B and E events
+
+                    if chrome_event['tid'] >= len(process_map[chrome_event['pid']]['threads']):
+                        otf2_location_group = process_map[chrome_event['pid']]['location']
+                        otf2_thread = otf2_trace.event_writer(
+                            str(process_map[chrome_event['pid']]['name']) + str(chrome_event['tid']),
+                            group=otf2_location_group)
+                        process_map[chrome_event['pid']]['threads'].append(otf2_thread)
+
                     if not chrome_event['name'] in function_map:
                         otf2_function = otf2_trace.definitions.region(chrome_event['name'])
                         function_map[chrome_event['name']] = otf2_function
 
-                    otf2_thread = process_map[chrome_event['pid']]
+                    otf2_thread = process_map[chrome_event['pid']]['threads'][chrome_event['tid']]
                     begin = chrome_event['ts']
-                    end = begin + chrome_event['dur']
+                    # begin = (chrome_event['ts'] - TIMER_MIN)
+                    end = (begin + chrome_event['dur'])
                     function = function_map[chrome_event['name']]
                     otf2_thread.enter(begin, function)
                     otf2_thread.leave(end, function)
 
+                elif chrome_event['ph'] == 'C':  # Counter Events
+                    pass
 
+                elif chrome_event['ph'] in ['s', 't', 'f']:  # Flow Events (start, step, end)
+                    pass
+
+                else:
+                    print("untrackt event found: {}".format(chrome_event))
 
 
 def main():
@@ -53,7 +79,7 @@ def main():
     )
     parser.add_argument(
         "-c", "--clean",
-        action = "store_true",
+        action="store_true",
         help="Clean (delete) the output folder if it exists",
     )
     args = parser.parse_args()
@@ -64,3 +90,6 @@ def main():
 
     convertTrace(args.input, out_folder)
 
+
+if __name__ == '__main__':
+    main()
