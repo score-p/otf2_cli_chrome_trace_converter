@@ -20,7 +20,7 @@ def convertTrace(input, output):
     with open(input) as json_file:
         chrome_data = json.load(json_file)
         with otf2.writer.open(output,
-                              timer_resolution=TIMER_GRANULARITY) as otf2_trace:  # TODO definitions=trace_reader.definitions
+                              timer_resolution=TIMER_GRANULARITY) as otf2_trace: 
             otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
             otf2_system_tree_node = otf2_trace.definitions.system_tree_node("myHost", parent=otf2_root_node)
 
@@ -48,9 +48,10 @@ def convertTrace(input, output):
                         function_map[chrome_event['name']] = otf2_function
 
                     otf2_thread = process_map[chrome_event['pid']]['threads'][chrome_event['tid']]
+
                     begin = chrome_event['ts']
-                    # begin = (chrome_event['ts'] - TIMER_MIN)
                     end = (begin + chrome_event['dur'])
+
                     function = function_map[chrome_event['name']]
                     otf2_thread.enter(begin, function)
                     otf2_thread.leave(end, function)
