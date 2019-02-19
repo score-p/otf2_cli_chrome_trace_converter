@@ -10,3 +10,4 @@ Therefore, we only take care of features used by TensorFlow's traces at the mome
   TensorFlow seems to write well sorted timestamps for each threads. Nevertheless, Google's trace specification does not require this.
 * Dataflow
 * Metric: Top allocations
+* Map new created processes for only collecting one metric to process with same name

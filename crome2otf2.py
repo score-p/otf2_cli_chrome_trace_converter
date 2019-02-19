@@ -17,6 +17,7 @@ class TensorFlowTrace2OTF2:
         self._input_file = input_file
         self._process_map = {}
         self._function_map = {}
+        self._metric_map = {}
         self._dataflow_start = None
 
     def convert_trace(self, output_dir):
@@ -42,14 +43,34 @@ class TensorFlowTrace2OTF2:
 
                     # Counter Events
                     elif chrome_event['ph'] == 'C':
-                        pass
-                    
+                        self.handle_metric(chrome_event, otf2_trace)
+
                     # Flow Events (start, step, end)
                     elif chrome_event['ph'] in ['s', 't', 'f']:
                         self.handle_dataflow(chrome_event)
 
                     else:
                         print("untrackt event found: {}".format(chrome_event))
+
+    #TODO Map new created processes for only collecting one metric to process with same name
+    def handle_metric(self, chrome_event, otf2_trace):
+        metric_name = chrome_event['name']
+        chrome_process_id = chrome_event['pid']
+        chrome_thread_id = chrome_event['tid']
+        if metric_name == 'Allocated Bytes':
+            if chrome_event['name'] not in self._metric_map:
+                self.otf2_add_metric(otf2_trace, metric_name, 'Bytes')
+
+            if chrome_thread_id >= len(self._process_map[chrome_process_id]['threads']):
+                self.otf2_add_thread(chrome_thread_id, chrome_process_id, otf2_trace)
+
+            metric_value = chrome_event['args']['Allocator Bytes in Use']
+            otf2_thread = self._process_map[chrome_process_id]['threads'][chrome_thread_id]
+            otf2_thread.metric(chrome_event['ts'], self._metric_map[metric_name], metric_value)
+
+    def otf2_add_metric(self, otf2_trace, name, unit):
+        metric = otf2_trace.definitions.metric(name, unit=unit)
+        self._metric_map[name] = metric
 
     def handle_metadata(self, chrome_event, otf2_system_tree_node, otf2_trace):
         otf2_location_group = otf2_trace.definitions.location_group(chrome_event['args']['name'],
