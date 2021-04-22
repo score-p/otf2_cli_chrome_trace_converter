@@ -29,3 +29,4 @@ python3 -c 'import otf2; print(otf2.__version__)'  # 2.3
  * Metric: Top allocations
  * Map new created processes for only collecting one metric to process with same name
  * If available, add memory trace as a custom metric
+ * Add multi-host support

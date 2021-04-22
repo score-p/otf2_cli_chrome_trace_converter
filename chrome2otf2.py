@@ -24,25 +24,45 @@ def is_gzip_file(path):
 
 class TensorFlowTrace2OTF2:
 
-    def __init__(self, input_path):
+    def __init__(self, input_path, memory_profile_path = None):
+        """
+        input_path : A path to a folder containing a "<hostname>.memory_profile.json.gz" and
+                     "<hostname>.trace.json.gz" or path to the latter directly.
+        memory_profile_path : Path to the "<hostname>.memory_profile.json.gz". If input_path
+                     is a folder and this is not set, then search in the folder for this file.
+        """
+
         if not input_path or not os.path.exists(input_path):
             raise Exception("Specified location does not exist:", input_path)
 
-        input_file = None
+        if memory_profile_path and not os.path.exists(memory_profile_path):
+            raise Exception("Specified memory profile location does not exist:", memory_profile_path)
+
+        self._trace_file = None
+        self._memory_trace_file = memory_profile_path
+
         if os.path.isfile(input_path):
-            input_file = input_path
+            self._trace_file = input_path
         elif os.path.isdir(input_path):
             for root, dirs, files in os.walk(input_path):
                 for filename in files:
                     if filename.endswith('.trace.json.gz') or filename.endswith('.trace.json'):
-                        if input_file is None:
-                            input_file = os.path.join(root, filename)
+                        if self._trace_file is None:
+                            self._trace_file = os.path.join(root, filename)
                         else:
-                            raise Exception("Found multiple chrome traces. Please specify the file or folder directly!")
-        if not input_file:
+                            raise Exception("Found multiple chrome traces. "
+                                            "Please specify the file or folder directly!")
+
+                    if filename.endswith('.memory_profile.json.gz') or filename.endswith('.memory_profile.json'):
+                        if self._memory_trace_file is None:
+                            self._memory_trace_file = os.path.join(root, filename)
+                        else:
+                            raise Exception("Found multiple memory profiles. "
+                                            "Please specify the file or folder directly!")
+
+        if not self._trace_file:
             raise Exception("No chrome trace found")
 
-        self._trace_file = input_file
         # Process ID -> { 'threads' : { <Chrome Thread ID> : <OTF2 location object> }, 'name' : ..., 'location' : ... }
         self._process_map = {}
         self._function_map = {}
@@ -54,57 +74,118 @@ class TensorFlowTrace2OTF2:
         if not output_dir:
             raise Exception("No output trace")
 
-        with gzip.open(self._trace_file) if is_gzip_file(self._trace_file) else open(self._trace_file) as json_file, \
-             otf2.writer.open(output_dir, timer_resolution=TIMER_GRANULARITY) as otf2_trace:
-            chrome_data = json.load(json_file)
+        with otf2.writer.open(output_dir, timer_resolution=TIMER_GRANULARITY) as otf2_trace:
+            self._otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
+            self._otf2_system_tree_host = otf2_trace.definitions.system_tree_node("myHost", parent=self._otf2_root_node)
 
-            otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
-            otf2_system_tree_node = otf2_trace.definitions.system_tree_node("myHost", parent=otf2_root_node)
+            with gzip.open(self._trace_file) if is_gzip_file(self._trace_file) \
+                 else open(self._trace_file) as json_file:
+                chrome_data = json.load(json_file)
+                self._convert_event_trace(chrome_data, otf2_trace)
 
-            for chrome_event in chrome_data['traceEvents']:
-                if not chrome_event:
-                    # Trace might contain an empty event at the end for some reason
-                    pass
+            if self._memory_trace_file:
+                with gzip.open(self._memory_trace_file) if is_gzip_file(self._memory_trace_file) \
+                     else open(self._memory_trace_file) as json_file:
+                    memory_data = json.load(json_file)
+                    self._convert_memory_profile(memory_data, otf2_trace)
 
-                # Metadata Events
-                elif chrome_event['ph'] == 'M':
-                    self._handle_metadata(chrome_event, otf2_system_tree_node, otf2_trace)
 
-                # Flow Events (start, step, end)
-                elif chrome_event['ph'] in ['s', 't', 'f']:
-                    self._handle_dataflow(chrome_event)
+    def _convert_event_trace(self, chrome_data, otf2_trace):
+        for chrome_event in chrome_data['traceEvents']:
+            if not chrome_event:
+                # Trace might contain an empty event at the end for some reason
+                pass
 
-                # Counter Events
-                elif chrome_event['ph'] == 'C':
-                    self._handle_metric(chrome_event, otf2_trace)
+            # Metadata Events
+            elif chrome_event['ph'] == 'M':
+                self._handle_metadata(chrome_event, self._otf2_system_tree_host, otf2_trace)
 
-                elif chrome_event['ph'] == 'X' and 'ts' in chrome_event and 'dur' in chrome_event:
-                    pass # will be handled separately in order to sort enter leave events by time
+            # Flow Events (start, step, end)
+            elif chrome_event['ph'] in ['s', 't', 'f']:
+                self._handle_dataflow(chrome_event)
 
-                # Complete Events, TensorFlow seems to not use B and E events
-                else:
-                    print("Unknown event found: {}".format(chrome_event))
+            # Counter Events
+            elif chrome_event['ph'] == 'C':
+                self._handle_metric(chrome_event, otf2_trace)
 
-            # Split all tracing events of the form 'ts', 'dur' into separate enter leave events.
-            sorted_events = []
-            for chrome_event in chrome_data['traceEvents']:
-                if (
-                    'ts' in chrome_event and 'dur' in chrome_event
-                    and 'ph' in chrome_event and chrome_event['ph'] == 'X'
-                ):
-                    enter_event = copy.deepcopy(chrome_event)
-                    # The enter events will have the 'dur' key deleted to be recognized!
-                    del enter_event['dur']
-                    sorted_events.append(enter_event)
-                    sorted_events.append(chrome_event)
+            elif chrome_event['ph'] == 'X' and 'ts' in chrome_event and 'dur' in chrome_event:
+                pass # will be handled separately in order to sort enter leave events by time
 
-            sorted_events = sorted(sorted_events, key = lambda e: (e['ts'] + ( e['dur'] if 'dur' in e else 0 )))
-            for chrome_event in sorted_events:
-                if chrome_event['ph'] == 'X':
-                    self._handle_event(chrome_event, otf2_trace)
+            # Complete Events, TensorFlow seems to not use B and E events
+            else:
+                print("Unknown event found: {}".format(chrome_event))
 
-                else:
-                    print("Unknown timestamped event found: {}".format(chrome_event))
+        # Split all tracing events of the form 'ts', 'dur' into separate enter leave events.
+        sorted_events = []
+        for chrome_event in chrome_data['traceEvents']:
+            if (
+                'ts' in chrome_event and 'dur' in chrome_event
+                and 'ph' in chrome_event and chrome_event['ph'] == 'X'
+            ):
+                enter_event = copy.deepcopy(chrome_event)
+                # The enter events will have the 'dur' key deleted to be recognized!
+                del enter_event['dur']
+                sorted_events.append(enter_event)
+                sorted_events.append(chrome_event)
+
+        sorted_events = sorted(sorted_events, key = lambda e: (e['ts'] + ( e['dur'] if 'dur' in e else 0 )))
+        for chrome_event in sorted_events:
+            if chrome_event['ph'] == 'X':
+                self._handle_event(chrome_event, otf2_trace)
+
+            else:
+                print("Unknown timestamped event found: {}".format(chrome_event))
+
+
+    def _convert_memory_profile(self, memory_data, otf2_trace):
+        otf2_location_group = otf2_trace.definitions.location_group(
+            "TF Memory Allocators", system_tree_parent=self._otf2_system_tree_host)
+
+        memory_activities = {}
+        otf2_attributes = {}
+        uint_metadata = [ # These are some values which are strings in the JSON even though they are integers
+            "stackReservedBytes", "heapAllocatedBytes", "freeMemoryBytes", "peakBytesInUse",
+            "requestedBytes", "allocationBytes", "address", "stepId"
+        ]
+
+        last_leave = None
+
+        for allocator_name, profile in memory_data['memoryProfilePerAllocator'].items():
+            location = otf2_trace.event_writer(allocator_name, group=otf2_location_group)
+
+            for snapshot in profile['memoryProfileSnapshots']:
+                activity = snapshot['activityMetadata']['memoryActivity']
+                if activity not in memory_activities:
+                    memory_activities[activity] = otf2_trace.definitions.region(activity, paradigm=otf2.Paradigm.USER)
+
+                event_attributes = copy.deepcopy(snapshot['activityMetadata'])
+                event_attributes.update(snapshot['aggregationStats'])
+
+                otf2_event_attributes = {}
+
+                for key, value in event_attributes.items():
+                    if key not in otf2_attributes:
+                        type = otf2.Type.STRING
+                        if key in uint_metadata:
+                            value = int(value)
+                            type = otf2.Type.UINT64
+                        elif key is isinstance(value, int):
+                            type = otf2.Type.INT64
+                        elif key is isinstance(value, float):
+                            type = otf2.Type.DOUBLE
+
+                        otf2_attributes[key] = otf2_trace.definitions.attribute(name=key, type=type)
+
+                    otf2_event_attributes[otf2_attributes[key]] = value
+
+                timestamp = int(snapshot['timeOffsetPs']) // 1000  # Time is in picoseconds but precision is nanoseconds
+                if last_leave: # Put the leave at the next enter in order to not create invisible metrics and regions
+                    location.leave(timestamp, region=last_leave)
+                location.enter(timestamp, memory_activities[activity], attributes=otf2_event_attributes)
+                last_leave = memory_activities[activity]
+
+        if last_leave:
+            location.leave(timestamp, region=last_leave)
 
 
     @staticmethod
