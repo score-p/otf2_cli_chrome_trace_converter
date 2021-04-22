@@ -25,8 +25,6 @@ python3 -c 'import otf2; print(otf2.__version__)'  # 2.3
 
 ## TODO
 
- * Timestamp sorting:
-   TensorFlow seems to write well sorted timestamps for each threads. Nevertheless, Google's trace specification does not require this.
  * Dataflow
  * Metric: Top allocations
  * Map new created processes for only collecting one metric to process with same name
