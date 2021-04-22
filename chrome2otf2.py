@@ -1,4 +1,5 @@
 import argparse
+import gzip
 import json
 import os
 import shutil
@@ -8,13 +9,36 @@ import otf2
 TIMER_GRANULARITY = 1000000  # chrome traces uses micro seconds
 
 
+def is_gzip_file(path):
+    try:
+        file = gzip.open(self._trace_file)
+        file.read(1)
+        return True
+    except Exception:
+        return False
+
+
 class TensorFlowTrace2OTF2:
 
-    def __init__(self, input_file):
-        if not input or not os.path.isfile(input_file):
+    def __init__(self, input_path):
+        if not input_path or not os.path.exists(input_path):
+            raise Exception("Specified location does not exist:", input_path)
+
+        input_file = None
+        if os.path.isfile(input_path):
+            input_file = input_path
+        elif os.path.isdir(input_path):
+            for root, dirs, files in os.walk(input_path):
+                for filename in files:
+                    if filename.endswith('.trace.json.gz') or filename.endswith('.trace.json'):
+                        if input_file is None:
+                            input_file = os.path.join(root, filename)
+                        else:
+                            raise Exception("Found multiple chrome traces. Please specify the file or folder directly!")
+        if not input_file:
             raise Exception("No chrome trace found")
 
-        self._input_file = input_file
+        self._trace_file = input_file
         self._process_map = {}
         self._function_map = {}
         self._metric_map = {}
@@ -24,7 +48,7 @@ class TensorFlowTrace2OTF2:
         if not output_dir:
             raise Exception("No output trace")
 
-        with open(self._input_file) as json_file:
+        with gzip.open(self._trace_file) if is_gzip_file(self._trace_file) else open(self._trace_file) as json_file:
             chrome_data = json.load(json_file)
             with otf2.writer.open(output_dir,
                                   timer_resolution=TIMER_GRANULARITY) as otf2_trace:
