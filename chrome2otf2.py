@@ -79,17 +79,17 @@ class TensorFlowTrace2OTF2:
     #TODO Map newly created processes for only collecting one metric to process with same name
     def _handle_metric(self, chrome_event, otf2_trace):
         metric_name = chrome_event['name']
-        chrome_process_id = chrome_event['pid']
-        chrome_thread_id = chrome_event['tid']
+        cpid = chrome_event['pid']
+        ctid = chrome_event['tid']
         if metric_name == 'Allocated Bytes':
             if chrome_event['name'] not in self._metric_map:
                 self.otf2_add_metric(otf2_trace, metric_name, 'Bytes')
 
-            if chrome_thread_id >= len(self._process_map[chrome_process_id]['threads']):
-                self._otf2_add_thread(chrome_thread_id, chrome_process_id, otf2_trace)
+            if ctid >= len(self._process_map[cpid]['threads']):
+                self._otf2_add_thread(ctid, cpid, otf2_trace)
 
             metric_value = chrome_event['args']['Allocator Bytes in Use']
-            otf2_thread = self._process_map[chrome_process_id]['threads'][chrome_thread_id]
+            otf2_thread = self._process_map[cpid]['threads'][ctid]
             otf2_thread.metric(chrome_event['ts'], self._metric_map[metric_name], metric_value)
 
     def otf2_add_metric(self, otf2_trace, name, unit):
@@ -103,15 +103,15 @@ class TensorFlowTrace2OTF2:
                                                   'name': chrome_event['args']['name']}
 
     def _handle_event(self, chrome_event, otf2_trace):
-        chrome_process_id = chrome_event['pid']
-        chrome_thread_id = chrome_event['tid']
-        if chrome_thread_id >= len(self._process_map[chrome_process_id]['threads']):
-            self._otf2_add_thread(chrome_thread_id, chrome_process_id, otf2_trace)
+        cpid = chrome_event['pid']
+        ctid = chrome_event['tid']
+        if ctid >= len(self._process_map[cpid]['threads']):
+            self._otf2_add_thread(ctid, cpid, otf2_trace)
 
         if not chrome_event['name'] in self._function_map:
             self._otf2_add_function(chrome_event['name'], otf2_trace)
 
-        otf2_thread = self._process_map[chrome_process_id]['threads'][chrome_thread_id]
+        otf2_thread = self._process_map[cpid]['threads'][ctid]
         otf2_function = self._function_map[chrome_event['name']]
 
         begin = chrome_event['ts']
@@ -120,12 +120,12 @@ class TensorFlowTrace2OTF2:
         otf2_thread.enter(begin, otf2_function)
         otf2_thread.leave(end, otf2_function)
 
-    def _otf2_add_thread(self, chrome_thread_id, chrome_process_id, otf2_trace):
-        otf2_location_group = self._process_map[chrome_process_id]['location']
+    def _otf2_add_thread(self, ctid, cpid, otf2_trace):
+        otf2_location_group = self._process_map[cpid]['location']
         otf2_thread = otf2_trace.event_writer(
-            str(self._process_map[chrome_process_id]['name']) + str(chrome_thread_id),
+            str(self._process_map[cpid]['name']) + str(ctid),
             group=otf2_location_group)
-        self._process_map[chrome_process_id]['threads'].append(otf2_thread)
+        self._process_map[cpid]['threads'].append(otf2_thread)
 
     def _otf2_add_function(self, name, otf2_trace):
         otf2_function = otf2_trace.definitions.region(name, paradigm=otf2.Paradigm.USER)
