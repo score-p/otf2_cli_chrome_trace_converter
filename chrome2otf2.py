@@ -48,36 +48,36 @@ class TensorFlowTrace2OTF2:
         if not output_dir:
             raise Exception("No output trace")
 
-        with gzip.open(self._trace_file) if is_gzip_file(self._trace_file) else open(self._trace_file) as json_file:
+        with gzip.open(self._trace_file) if is_gzip_file(self._trace_file) else open(self._trace_file) as json_file, \
+             otf2.writer.open(output_dir, timer_resolution=TIMER_GRANULARITY) as otf2_trace:
             chrome_data = json.load(json_file)
-            with otf2.writer.open(output_dir,
-                                  timer_resolution=TIMER_GRANULARITY) as otf2_trace:
-                otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
-                otf2_system_tree_node = otf2_trace.definitions.system_tree_node("myHost", parent=otf2_root_node)
 
-                for chrome_event in chrome_data['traceEvents']:
+            otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
+            otf2_system_tree_node = otf2_trace.definitions.system_tree_node("myHost", parent=otf2_root_node)
 
-                    # Metadata Events
-                    if chrome_event['ph'] == 'M' and chrome_event['name'] == 'process_name':
-                        self.handle_metadata(chrome_event, otf2_system_tree_node, otf2_trace)
+            for chrome_event in chrome_data['traceEvents']:
 
-                    # Complete Events, TensorFlow seems to not use B and E events
-                    elif chrome_event['ph'] == 'X' and chrome_event['cat'] == "Op":
-                        self.handle_event(chrome_event, otf2_trace)
+                # Metadata Events
+                if chrome_event['ph'] == 'M' and chrome_event['name'] == 'process_name':
+                    self._handle_metadata(chrome_event, otf2_system_tree_node, otf2_trace)
 
-                    # Counter Events
-                    elif chrome_event['ph'] == 'C':
-                        self.handle_metric(chrome_event, otf2_trace)
+                # Complete Events, TensorFlow seems to not use B and E events
+                elif chrome_event['ph'] == 'X' and ( 'cat' not in chrome_event or chrome_event['cat'] == "Op" ):
+                    self._handle_event(chrome_event, otf2_trace)
 
-                    # Flow Events (start, step, end)
-                    elif chrome_event['ph'] in ['s', 't', 'f']:
-                        self.handle_dataflow(chrome_event)
+                # Counter Events
+                elif chrome_event['ph'] == 'C':
+                    self._handle_metric(chrome_event, otf2_trace)
 
-                    else:
-                        print("untrackt event found: {}".format(chrome_event))
+                # Flow Events (start, step, end)
+                elif chrome_event['ph'] in ['s', 't', 'f']:
+                    self._handle_dataflow(chrome_event)
 
-    #TODO Map new created processes for only collecting one metric to process with same name
-    def handle_metric(self, chrome_event, otf2_trace):
+                else:
+                    print("untrackt event found: {}".format(chrome_event))
+
+    #TODO Map newly created processes for only collecting one metric to process with same name
+    def _handle_metric(self, chrome_event, otf2_trace):
         metric_name = chrome_event['name']
         chrome_process_id = chrome_event['pid']
         chrome_thread_id = chrome_event['tid']
@@ -86,7 +86,7 @@ class TensorFlowTrace2OTF2:
                 self.otf2_add_metric(otf2_trace, metric_name, 'Bytes')
 
             if chrome_thread_id >= len(self._process_map[chrome_process_id]['threads']):
-                self.otf2_add_thread(chrome_thread_id, chrome_process_id, otf2_trace)
+                self._otf2_add_thread(chrome_thread_id, chrome_process_id, otf2_trace)
 
             metric_value = chrome_event['args']['Allocator Bytes in Use']
             otf2_thread = self._process_map[chrome_process_id]['threads'][chrome_thread_id]
@@ -96,20 +96,20 @@ class TensorFlowTrace2OTF2:
         metric = otf2_trace.definitions.metric(name, unit=unit)
         self._metric_map[name] = metric
 
-    def handle_metadata(self, chrome_event, otf2_system_tree_node, otf2_trace):
+    def _handle_metadata(self, chrome_event, otf2_system_tree_node, otf2_trace):
         otf2_location_group = otf2_trace.definitions.location_group(chrome_event['args']['name'],
                                                                     system_tree_parent=otf2_system_tree_node)
         self._process_map[chrome_event['pid']] = {'location': otf2_location_group, 'threads': [],
                                                   'name': chrome_event['args']['name']}
 
-    def handle_event(self, chrome_event, otf2_trace):
+    def _handle_event(self, chrome_event, otf2_trace):
         chrome_process_id = chrome_event['pid']
         chrome_thread_id = chrome_event['tid']
         if chrome_thread_id >= len(self._process_map[chrome_process_id]['threads']):
-            self.otf2_add_thread(chrome_thread_id, chrome_process_id, otf2_trace)
+            self._otf2_add_thread(chrome_thread_id, chrome_process_id, otf2_trace)
 
         if not chrome_event['name'] in self._function_map:
-            self.otf2_add_function(chrome_event['name'], otf2_trace)
+            self._otf2_add_function(chrome_event['name'], otf2_trace)
 
         otf2_thread = self._process_map[chrome_process_id]['threads'][chrome_thread_id]
         otf2_function = self._function_map[chrome_event['name']]
@@ -120,19 +120,19 @@ class TensorFlowTrace2OTF2:
         otf2_thread.enter(begin, otf2_function)
         otf2_thread.leave(end, otf2_function)
 
-    def otf2_add_thread(self, chrome_thread_id, chrome_process_id, otf2_trace):
+    def _otf2_add_thread(self, chrome_thread_id, chrome_process_id, otf2_trace):
         otf2_location_group = self._process_map[chrome_process_id]['location']
         otf2_thread = otf2_trace.event_writer(
             str(self._process_map[chrome_process_id]['name']) + str(chrome_thread_id),
             group=otf2_location_group)
         self._process_map[chrome_process_id]['threads'].append(otf2_thread)
 
-    def otf2_add_function(self, name, otf2_trace):
+    def _otf2_add_function(self, name, otf2_trace):
         otf2_function = otf2_trace.definitions.region(name, paradigm=otf2.Paradigm.USER)
         self._function_map[name] = otf2_function
 
     # TODO implementation of dataflow
-    def handle_dataflow(self, chrome_event):
+    def _handle_dataflow(self, chrome_event):
         if chrome_event['ph'] == 's':
             if self._dataflow_start is not None:
                 print("corrupted trace in dataflow: {}".format(chrome_event))
@@ -148,7 +148,7 @@ class TensorFlowTrace2OTF2:
             self._dataflow_start = None
 
 
-def main():
+def cli():
     parser = argparse.ArgumentParser(description="Convert chrome traces into OTF2")
     parser.add_argument(
         "-i", "--input",
@@ -176,4 +176,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    cli()
