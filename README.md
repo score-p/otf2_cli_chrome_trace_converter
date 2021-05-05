@@ -12,12 +12,21 @@ This script requires the OTF2 Python bindings. These are installed with the OTF2
 wget http://perftools.pages.jsc.fz-juelich.de/cicd/otf2/tags/otf2-2.3/otf2-2.3.tar.gz
 tar -xf otf2-2.3.tar.gz
 cd otf2-2.3
-./configure --prefix=/opt/otf2.3 && make && make install
+./configure --prefix=/opt/otf2.3
+```
 
-export OTF2_ROOT=/opt/otf2.3
-export PATH=$PATH:$OTF2_ROOT/bin
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$OTF2_ROOT/lib
-export PYTHON_PATH=$PYTHON_PATH:$OTF2_ROOT/lib/python3.8/site-packages
+Ensure that the summary output includes the line:
+
+```
+      Python bindings support:  yes, using /usr/bin/python3
+```
+
+If not, it tells you which Python dependecies are missing. Continue with:
+
+```bahs
+make && make install
+
+export PYTHON_PATH=$PYTHON_PATH:$(/opt/otf2.3/otf2-config --pythonpath)
 
 python3 -c 'import otf2; print(otf2.__version__)'  # 2.3
 ```
