@@ -23,7 +23,7 @@ Ensure that the summary output includes the line:
 
 If not, it tells you which Python dependecies are missing. Continue with:
 
-```bahs
+```bash
 make && make install
 
 export PYTHON_PATH=$PYTHON_PATH:$(/opt/otf2.3/otf2-config --pythonpath)
