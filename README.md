@@ -26,7 +26,7 @@ If not, it tells you which Python dependecies are missing. Continue with:
 ```bash
 make && make install
 
-export PYTHON_PATH=$PYTHON_PATH:$(/opt/otf2.3/otf2-config --pythonpath)
+export PYTHONPATH=$PYTHONPATH:$(/opt/otf2.3/otf2-config --pythonpath)
 
 python3 -c 'import otf2; print(otf2.__version__)'  # 2.3
 ```
