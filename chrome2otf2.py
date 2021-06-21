@@ -220,30 +220,28 @@ class TensorFlowTrace2OTF2:
 
     def _handle_metadata(self, chrome_event, otf2_system_tree_node, otf2_trace):
         if 'name' in chrome_event and chrome_event['name'] == 'process_name':
-            otf2_location_group = otf2_trace.definitions.location_group(chrome_event['args']['name'],
-                                                                        system_tree_parent=otf2_system_tree_node)
-
-            cpid = chrome_event['pid']
-            if cpid not in self._process_map:
-                self._process_map[cpid] = { 'threads': {} }
-
-            self._process_map[cpid].update({
-                'location': otf2_location_group,
-                'name': chrome_event['args']['name']
-            })
+            name = str(chrome_event['args']['name']) + str(" ") + str(chrome_event['pid'])
+            self._otf2_add_process(chrome_event['pid'], otf2_trace, otf2_system_tree_node, name)
 
         elif 'name' in chrome_event and chrome_event['name'] == 'thread_name':
+            cpid = chrome_event['pid']
             ctid = chrome_event['tid']
+            if cpid == 0 and ctid == 0:
+                # ignore events of system processes, e.g., swapper
+                return
+            if cpid not in self._process_map:
+                self._otf2_add_process(cpid, otf2_trace, otf2_system_tree_node, name = chrome_event['args']['name'] + str(" ") + str(chrome_event['pid']))
             assert ctid not in self._process_map[chrome_event['pid']]['threads'], \
                    "The thread_name metadata event should be the very first event for that thread!"
-            self._otf2_add_thread(ctid, chrome_event['pid'], otf2_trace, name = chrome_event['args']['name'])
+            name = str(chrome_event['args']['name']) + str(" ") + str(chrome_event['tid'])
+            self._otf2_add_thread(ctid, chrome_event['pid'], otf2_trace, name)
 
         else:
             print("Unknown metadata event:", chrome_event)
 
     def _handle_event(self, chrome_event, otf2_trace):
-        if 'cat' in chrome_event and chrome_event['cat'] != "Op":
-            raise Exception("Unknown trace event found:", chrome_event)
+#        if 'cat' in chrome_event and chrome_event['cat'] != "Op":
+#            raise Exception("Unknown trace event found:", chrome_event)
 
         cpid = chrome_event['pid']
         ctid = chrome_event['tid']
@@ -261,6 +259,20 @@ class TensorFlowTrace2OTF2:
             otf2_thread.leave(self._convert_time_to_ticks(chrome_event['ts'] + chrome_event['dur']), otf2_function)
         else:
             otf2_thread.enter(self._convert_time_to_ticks(chrome_event['ts']), otf2_function)
+
+    def _otf2_add_process(self, cpid, otf2_trace, otf2_system_tree_node, name = None ):
+        otf2_location_group = otf2_trace.definitions.location_group(
+            str(cpid) if name is None else name,
+            system_tree_parent=otf2_system_tree_node
+        )
+
+        if cpid not in self._process_map:
+            self._process_map[cpid] = { 'threads': {} }
+
+        self._process_map[cpid].update({
+            'location': otf2_location_group,
+            'name': str(cpid) if name is None else name
+        })
 
     def _otf2_add_thread(self, ctid, cpid, otf2_trace, name = None):
         self._process_map[cpid]['threads'][ctid] = otf2_trace.event_writer(
