@@ -24,7 +24,7 @@ def is_gzip_file(path):
         return False
 
 
-class TensorFlowTrace2OTF2:
+class ChromeTrace2OTF2:
     def __init__(self, input_path: str, memory_profile_path: Optional[str] = None) -> None:
         """
         input_path : A path to a folder containing a "<hostname>.memory_profile.json.gz" and
@@ -340,7 +340,7 @@ def cli():
     if args.clean and os.path.exists(out_folder):
         shutil.rmtree(out_folder)
 
-    converter = TensorFlowTrace2OTF2(args.input)
+    converter = ChromeTrace2OTF2(args.input)
     converter.convert_trace(out_folder)
 
 
