@@ -99,10 +99,30 @@ class ChromeTrace2OTF2:
             'B': self._handle_duration_begin_end,
             'E': self._handle_duration_begin_end,
             'X': self._handle_complete,
+            'i': self._handle_instant,
+            'I': self._handle_deprecated,  # Deprecated instant event
             'C': self._handle_counter,
+            'b': self._handle_async_nestable_start,
+            'n': self._handle_async_nestable_instant,
+            'e': self._handle_async_nestable_end,
+            'S': self._handle_deprecated,  # Deprecated async start event
+            'T': self._handle_deprecated,  # Deprecated async step into event
+            'p': self._handle_deprecated,  # Deprecated async step past event
+            'F': self._handle_deprecated,  # Deprecated async end event
             's': self._handle_flow_start,
             't': self._handle_flow_step,
+            'f': self._handle_flow_end,
+            'P': self._handle_sample,
+            'N': self._handle_object_create,
+            'O': self._handle_object_snapshot,
+            'D': self._handle_object_destroy,
             'M': self._handle_metadata,
+            'V': self._handle_memory_dump_global,
+            'v': self._handle_memory_dump_process,
+            'R': self._handle_mark,
+            'c': self._handle_clock_sync,
+            '(': self._handle_context_enter,
+            ')': self._handle_context_leave,
         }
 
         self._duration_events: List[DurationEvent] = []
@@ -259,10 +279,15 @@ class ChromeTrace2OTF2:
     ) -> otf2.event_writer.EventWriter:
         return self._get_location_writer(int(event['pid']), int(event['tid']), otf2_trace)
 
-    def _handle_duration_begin_end(self, event: Dict, otf2_trace: otf2.writer.Writer):
+    # Event handlers for every phase
+
+    def _handle_deprecated(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled deprecated event", event)
+
+    def _handle_duration_begin_end(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
         self._duration_events.append(self._convert_duration_event(event))
 
-    def _handle_complete(self, event: Dict, otf2_trace: otf2.writer.Writer):
+    def _handle_complete(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
         # Complete Events, TensorFlow seems to not use B and E events in an attempt to reduce the trace file size.
         # Split these complete events into enter/leave events in order to sort them by timestamp.
         # A special case might be X and B,E events being used in the same trace.
@@ -284,8 +309,14 @@ class ChromeTrace2OTF2:
         self._duration_events.append(self._convert_duration_event(enter_event))
         self._duration_events.append(self._convert_duration_event(leave_event))
 
+    def _handle_instant(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        # E.g., with a kineto pytorch trace, these are generated for memory accesses
+        # This would map well to a counter
+        # However, in general, these are more like samples
+        print("Unhandled event", event)
+
     # TODO Map newly created processes for only collecting one metric to process with same name
-    def _handle_counter(self, event: Dict, otf2_trace: otf2.writer.Writer):
+    def _handle_counter(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
         metric_name = event['name']
         if metric_name == 'Allocated Bytes':
             if metric_name not in self._metric_map:
@@ -295,34 +326,106 @@ class ChromeTrace2OTF2:
             writer = self._get_location_writer_from_event(event, otf2_trace)
             writer.metric(self._convert_time_to_ticks(event['ts']), self._metric_map[metric_name], metric_value)
 
-    def otf2_add_metric(self, otf2_trace: otf2.writer.Writer, name: str, unit: str) -> None:
-        metric = otf2_trace.definitions.metric(name, unit=unit)
-        self._metric_map[name] = metric
+    def _handle_async_nestable_start(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_async_nestable_instant(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_async_nestable_end(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    # TODO implementation of dataflow
+    def _handle_flow_start(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        if self._dataflow_start is not None:
+            print(f"corrupted trace in dataflow: {event}")
+            self._dataflow_start = None
+        self._dataflow_start = event['id']
+
+        # TODO dataflow handling
+
+    def _handle_flow_step(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        if self._dataflow_start != event['id']:
+            print(f"corrupted trace in dataflow: {event}")
+
+        # TODO dataflow handling
+
+        self._dataflow_start = None
+
+    def _handle_flow_end(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_sample(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_object_create(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_object_snapshot(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_object_destroy(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
 
     def _handle_metadata(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
-        if 'name' in event and event['name'] == 'process_name':
+        if 'name' not in event:
+            return
+        event_type = event['name']
+
+        if event_type == 'process_name':
             pid = int(event['pid'])
             name = f"{event['args']['name']} {pid}"
             self._otf2_add_process(pid, otf2_trace, self._otf2_system_tree_host, name)
 
-        elif 'name' in event and event['name'] == 'thread_name':
+        elif event_type == 'thread_name':
             pid = int(event['pid'])
             tid = int(event['tid'])
+            name = event['args']['name']
             if pid not in self._process_map:
-                self._otf2_add_process(
-                    pid,
-                    otf2_trace,
-                    self._otf2_system_tree_host,
-                    f"{event['args']['name']} {pid}",
-                )
+                self._otf2_add_process(pid, otf2_trace, self._otf2_system_tree_host, f"{name} {pid}")
             assert (
                 tid not in self._process_map[pid].threads
             ), "The thread_name metadata event should be the very first event for that thread!"
-            name = f"{event['args']['name']} {tid}"
-            self._otf2_add_thread(tid, pid, otf2_trace, name)
+            self._otf2_add_thread(tid, pid, otf2_trace, f"{name} {tid}")
+
+        elif event_type == 'process_labels':
+            labels = event['args']['labels']
+            print("Unhandled metadata event type:", event_type, labels)
+
+        elif event_type == 'process_sort_index:':
+            sort_index = event['sort_index']['labels']
+            print("Unhandled metadata event type:", event_type, sort_index)
+
+        elif event_type == 'thread_sort_index:':
+            sort_index = event['sort_index']['labels']
+            print("Unhandled metadata event type:", event_type, sort_index)
 
         else:
             print("Unknown metadata event:", event)
+
+    def _handle_memory_dump_global(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_memory_dump_process(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_mark(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_clock_sync(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_context_enter(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    def _handle_context_leave(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        print("Unhandled event", event)
+
+    # OTF2 Helpers to Add Defintiions
+
+    def otf2_add_metric(self, otf2_trace: otf2.writer.Writer, name: str, unit: str) -> None:
+        metric = otf2_trace.definitions.metric(name, unit=unit)
+        self._metric_map[name] = metric
 
     def _otf2_add_process(
         self,
@@ -353,23 +456,6 @@ class ChromeTrace2OTF2:
     def _otf2_add_function(self, name: str, otf2_trace: otf2.writer.Writer) -> None:
         otf2_function = otf2_trace.definitions.region(name, paradigm=otf2.Paradigm.USER)
         self._function_map[name] = otf2_function
-
-    # TODO implementation of dataflow
-    def _handle_flow_start(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
-        if self._dataflow_start is not None:
-            print(f"corrupted trace in dataflow: {event}")
-            self._dataflow_start = None
-        self._dataflow_start = event['id']
-
-        # TODO dataflow handling
-
-    def _handle_flow_step(self, event: Dict, otf2_trace: otf2.writer.Writer):
-        if self._dataflow_start != event['id']:
-            print(f"corrupted trace in dataflow: {event}")
-
-        # TODO dataflow handling
-
-        self._dataflow_start = None
 
 
 def cli():
