@@ -107,10 +107,14 @@ class ChromeTrace2OTF2:
         for event in chrome_data['traceEvents']:
             if not event:
                 # Trace might contain an empty event at the end for some reason
-                pass
+                continue
+
+            for key in ['ts', 'dur']:
+                if key in event:
+                    event[key] = int(event[key])
 
             # Metadata Events
-            elif event['ph'] == 'M':
+            if event['ph'] == 'M':
                 self._handle_metadata(event, self._otf2_system_tree_host, otf2_trace)
 
             # Flow Events (start, step, end)
@@ -211,10 +215,10 @@ class ChromeTrace2OTF2:
     # TODO Map newly created processes for only collecting one metric to process with same name
     def _handle_metric(self, event: Dict, otf2_trace: otf2.writer.Writer):
         metric_name = event['name']
-        pid = event['pid']
-        tid = event['tid']
+        pid = int(event['pid'])
+        tid = int(event['tid'])
         if metric_name == 'Allocated Bytes':
-            if event['name'] not in self._metric_map:
+            if metric_name not in self._metric_map:
                 self.otf2_add_metric(otf2_trace, metric_name, 'Bytes')
 
             if tid not in self._process_map[pid].threads:
@@ -232,31 +236,32 @@ class ChromeTrace2OTF2:
         self, event, otf2_system_tree_node: otf2.definitions.SystemTreeNode, otf2_trace: otf2.writer.Writer
     ) -> None:
         if 'name' in event and event['name'] == 'process_name':
-            name = str(event['args']['name']) + str(" ") + str(event['pid'])
-            self._otf2_add_process(event['pid'], otf2_trace, otf2_system_tree_node, name)
+            pid = int(event['pid'])
+            name = f"{event['args']['name']} {pid}"
+            self._otf2_add_process(pid, otf2_trace, otf2_system_tree_node, name)
 
         elif 'name' in event and event['name'] == 'thread_name':
-            pid = event['pid']
-            tid = event['tid']
+            pid = int(event['pid'])
+            tid = int(event['tid'])
             if pid not in self._process_map:
                 self._otf2_add_process(
                     pid,
                     otf2_trace,
                     otf2_system_tree_node,
-                    f"{event['args']['name']} {event['pid']}",
+                    f"{event['args']['name']} {pid}",
                 )
             assert (
-                tid not in self._process_map[event['pid']].threads
+                tid not in self._process_map[pid].threads
             ), "The thread_name metadata event should be the very first event for that thread!"
-            name = str(event['args']['name']) + str(" ") + str(event['tid'])
-            self._otf2_add_thread(tid, event['pid'], otf2_trace, name)
+            name = f"{event['args']['name']} {tid}"
+            self._otf2_add_thread(tid, pid, otf2_trace, name)
 
         else:
             print("Unknown metadata event:", event)
 
     def _handle_event(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
-        pid = event['pid']
-        tid = event['tid']
+        pid = int(event['pid'])
+        tid = int(event['tid'])
         if tid not in self._process_map[pid].threads:
             self._otf2_add_thread(tid, pid, otf2_trace)
             assert tid in self._process_map[pid].threads
