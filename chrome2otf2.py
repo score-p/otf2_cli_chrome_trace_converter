@@ -383,7 +383,7 @@ class ChromeTrace2OTF2:
 
         if event_type == 'process_name':
             pid = int(event['pid'])
-            name = f"{event['args']['name']} {pid}"
+            name = event['args']['name']
             self._otf2_add_process(pid, otf2_trace, self._otf2_system_tree_host, name)
 
         elif event_type == 'thread_name':
@@ -391,11 +391,11 @@ class ChromeTrace2OTF2:
             tid = int(event['tid'])
             name = event['args']['name']
             if pid not in self._process_map:
-                self._otf2_add_process(pid, otf2_trace, self._otf2_system_tree_host, f"{name} {pid}")
+                self._otf2_add_process(pid, otf2_trace, self._otf2_system_tree_host, name)
             assert (
                 tid not in self._process_map[pid].threads
             ), "The thread_name metadata event should be the very first event for that thread!"
-            self._otf2_add_thread(tid, pid, otf2_trace, f"{name} {tid}")
+            self._otf2_add_thread(tid, pid, otf2_trace, name)
 
         elif event_type == 'process_labels':
             labels = event['args']['labels']
