@@ -23,8 +23,7 @@ def is_gzip_file(path):
 
 
 class TensorFlowTrace2OTF2:
-
-    def __init__(self, input_path, memory_profile_path = None):
+    def __init__(self, input_path, memory_profile_path=None):
         """
         input_path : A path to a folder containing a "<hostname>.memory_profile.json.gz" and
                      "<hostname>.trace.json.gz" or path to the latter directly.
@@ -50,15 +49,15 @@ class TensorFlowTrace2OTF2:
                         if self._trace_file is None:
                             self._trace_file = os.path.join(root, filename)
                         else:
-                            raise Exception("Found multiple chrome traces. "
-                                            "Please specify the file or folder directly!")
+                            raise Exception("Found multiple chrome traces. Please specify the file or folder directly!")
 
                     if filename.endswith('.memory_profile.json.gz') or filename.endswith('.memory_profile.json'):
                         if self._memory_trace_file is None:
                             self._memory_trace_file = os.path.join(root, filename)
                         else:
-                            raise Exception("Found multiple memory profiles. "
-                                            "Please specify the file or folder directly!")
+                            raise Exception(
+                                "Found multiple memory profiles. Please specify the file or folder directly!"
+                            )
 
         if not self._trace_file:
             raise Exception("No chrome trace found")
@@ -80,17 +79,18 @@ class TensorFlowTrace2OTF2:
             self._otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
             self._otf2_system_tree_host = otf2_trace.definitions.system_tree_node("myHost", parent=self._otf2_root_node)
 
-            with gzip.open(self._trace_file, 'rb') if is_gzip_file(self._trace_file) \
-                 else open(self._trace_file, 'rb') as json_file:
+            with gzip.open(self._trace_file, 'rb') if is_gzip_file(self._trace_file) else open(
+                self._trace_file, 'rb'
+            ) as json_file:
                 chrome_data = json.load(json_file)
                 self._convert_event_trace(chrome_data, otf2_trace)
 
             if self._memory_trace_file:
-                with gzip.open(self._memory_trace_file, 'rb') if is_gzip_file(self._memory_trace_file) \
-                     else open(self._memory_trace_file, 'rb') as json_file:
+                with gzip.open(self._memory_trace_file, 'rb') if is_gzip_file(self._memory_trace_file) else open(
+                    self._memory_trace_file, 'rb'
+                ) as json_file:
                     memory_data = json.load(json_file)
                     self._convert_memory_profile(memory_data, otf2_trace)
-
 
     def _convert_event_trace(self, chrome_data, otf2_trace):
         for chrome_event in chrome_data['traceEvents']:
@@ -111,7 +111,7 @@ class TensorFlowTrace2OTF2:
                 self._handle_metric(chrome_event, otf2_trace)
 
             elif chrome_event['ph'] == 'X' and 'ts' in chrome_event and 'dur' in chrome_event:
-                pass # will be handled separately in order to sort enter leave events by time
+                pass  # will be handled separately in order to sort enter leave events by time
 
             # Complete Events, TensorFlow seems to not use B and E events
             else:
@@ -120,17 +120,14 @@ class TensorFlowTrace2OTF2:
         # Split all tracing events of the form 'ts', 'dur' into separate enter leave events.
         sorted_events = []
         for chrome_event in chrome_data['traceEvents']:
-            if (
-                'ts' in chrome_event and 'dur' in chrome_event
-                and 'ph' in chrome_event and chrome_event['ph'] == 'X'
-            ):
+            if 'ts' in chrome_event and 'dur' in chrome_event and 'ph' in chrome_event and chrome_event['ph'] == 'X':
                 enter_event = copy.deepcopy(chrome_event)
                 # The enter events will have the 'dur' key deleted to be recognized!
                 del enter_event['dur']
                 sorted_events.append(enter_event)
                 sorted_events.append(chrome_event)
 
-        sorted_events = sorted(sorted_events, key = lambda e: (e['ts'] + ( e['dur'] if 'dur' in e else 0 )))
+        sorted_events = sorted(sorted_events, key=lambda e: (e['ts'] + (e['dur'] if 'dur' in e else 0)))
         for chrome_event in sorted_events:
             if chrome_event['ph'] == 'X':
                 self._handle_event(chrome_event, otf2_trace)
@@ -138,16 +135,22 @@ class TensorFlowTrace2OTF2:
             else:
                 print(f"Unknown timestamped event found: {chrome_event}")
 
-
     def _convert_memory_profile(self, memory_data, otf2_trace):
         otf2_location_group = otf2_trace.definitions.location_group(
-            "TF Memory Allocators", system_tree_parent=self._otf2_system_tree_host)
+            "TF Memory Allocators", system_tree_parent=self._otf2_system_tree_host
+        )
 
         memory_activities = {}
         otf2_attributes = {}
-        uint_metadata = [ # These are some values which are strings in the JSON even though they are integers
-            "stackReservedBytes", "heapAllocatedBytes", "freeMemoryBytes", "peakBytesInUse",
-            "requestedBytes", "allocationBytes", "address", "stepId"
+        uint_metadata = [  # These are some values which are strings in the JSON even though they are integers
+            "stackReservedBytes",
+            "heapAllocatedBytes",
+            "freeMemoryBytes",
+            "peakBytesInUse",
+            "requestedBytes",
+            "allocationBytes",
+            "address",
+            "stepId",
         ]
 
         last_leave = None
@@ -181,7 +184,7 @@ class TensorFlowTrace2OTF2:
                     otf2_event_attributes[otf2_attributes[key]] = value
 
                 timestamp = int(snapshot['timeOffsetPs']) // 1000  # Time is in picoseconds but precision is nanoseconds
-                if last_leave: # Put the leave at the next enter in order to not create invisible metrics and regions
+                if last_leave:  # Put the leave at the next enter in order to not create invisible metrics and regions
                     location.leave(timestamp, region=last_leave)
                 location.enter(timestamp, memory_activities[activity], attributes=otf2_event_attributes)
                 last_leave = memory_activities[activity]
@@ -189,14 +192,12 @@ class TensorFlowTrace2OTF2:
         if last_leave:
             location.leave(timestamp, region=last_leave)
 
-
     @staticmethod
     def _convert_time_to_ticks(timestamp):
         """Converts microseconds with 3 decimal places for nanoseconds to nanoseconds (integer)"""
         return int(timestamp * 1e3)
 
-
-    #TODO Map newly created processes for only collecting one metric to process with same name
+    # TODO Map newly created processes for only collecting one metric to process with same name
     def _handle_metric(self, chrome_event, otf2_trace):
         metric_name = chrome_event['name']
         cpid = chrome_event['pid']
@@ -211,9 +212,7 @@ class TensorFlowTrace2OTF2:
             metric_value = chrome_event['args']['Allocator Bytes in Use']
             otf2_thread = self._process_map[cpid]['threads'][ctid]
             otf2_thread.metric(
-                self._convert_time_to_ticks(chrome_event['ts']),
-                self._metric_map[metric_name],
-                metric_value
+                self._convert_time_to_ticks(chrome_event['ts']), self._metric_map[metric_name], metric_value
             )
 
     def otf2_add_metric(self, otf2_trace, name, unit):
@@ -232,9 +231,15 @@ class TensorFlowTrace2OTF2:
                 # ignore events of system processes, e.g., swapper
                 return
             if cpid not in self._process_map:
-                self._otf2_add_process(cpid, otf2_trace, otf2_system_tree_node, name = chrome_event['args']['name'] + str(" ") + str(chrome_event['pid']))
-            assert ctid not in self._process_map[chrome_event['pid']]['threads'], \
-                   "The thread_name metadata event should be the very first event for that thread!"
+                self._otf2_add_process(
+                    cpid,
+                    otf2_trace,
+                    otf2_system_tree_node,
+                    name=chrome_event['args']['name'] + str(" ") + str(chrome_event['pid']),
+                )
+            assert (
+                ctid not in self._process_map[chrome_event['pid']]['threads']
+            ), "The thread_name metadata event should be the very first event for that thread!"
             name = str(chrome_event['args']['name']) + str(" ") + str(chrome_event['tid'])
             self._otf2_add_thread(ctid, chrome_event['pid'], otf2_trace, name)
 
@@ -242,9 +247,6 @@ class TensorFlowTrace2OTF2:
             print("Unknown metadata event:", chrome_event)
 
     def _handle_event(self, chrome_event, otf2_trace):
-#        if 'cat' in chrome_event and chrome_event['cat'] != "Op":
-#            raise Exception("Unknown trace event found:", chrome_event)
-
         cpid = chrome_event['pid']
         ctid = chrome_event['tid']
         if ctid not in self._process_map[cpid]['threads']:
@@ -262,24 +264,20 @@ class TensorFlowTrace2OTF2:
         else:
             otf2_thread.enter(self._convert_time_to_ticks(chrome_event['ts']), otf2_function)
 
-    def _otf2_add_process(self, cpid, otf2_trace, otf2_system_tree_node, name = None ):
+    def _otf2_add_process(self, cpid, otf2_trace, otf2_system_tree_node, name=None):
         otf2_location_group = otf2_trace.definitions.location_group(
-            str(cpid) if name is None else name,
-            system_tree_parent=otf2_system_tree_node
+            str(cpid) if name is None else name, system_tree_parent=otf2_system_tree_node
         )
 
         if cpid not in self._process_map:
-            self._process_map[cpid] = { 'threads': {} }
+            self._process_map[cpid] = {'threads': {}}
 
-        self._process_map[cpid].update({
-            'location': otf2_location_group,
-            'name': str(cpid) if name is None else name
-        })
+        self._process_map[cpid].update({'location': otf2_location_group, 'name': str(cpid) if name is None else name})
 
-    def _otf2_add_thread(self, ctid, cpid, otf2_trace, name = None):
+    def _otf2_add_thread(self, ctid, cpid, otf2_trace, name=None):
         self._process_map[cpid]['threads'][ctid] = otf2_trace.event_writer(
             str(self._process_map[cpid]['name']) + str(ctid) if name is None else name,
-            group=self._process_map[cpid]['location']
+            group=self._process_map[cpid]['location'],
         )
 
     def _otf2_add_function(self, name, otf2_trace):
@@ -306,17 +304,22 @@ class TensorFlowTrace2OTF2:
 def cli():
     parser = argparse.ArgumentParser(description="Convert chrome traces into OTF2")
     parser.add_argument(
-        "-i", "--input",
-        type=str, required=True,
+        "-i",
+        "--input",
+        type=str,
+        required=True,
         help="chrome tracing file",
     )
     parser.add_argument(
-        "-o", "--output",
-        type=str, required=True,
+        "-o",
+        "--output",
+        type=str,
+        required=True,
         help="OTF2 Tracing folder",
     )
     parser.add_argument(
-        "-c", "--clean",
+        "-c",
+        "--clean",
         action="store_true",
         help="Clean (delete) the output folder if it exists",
     )
