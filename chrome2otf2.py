@@ -8,11 +8,19 @@ import json
 import os
 import shutil
 
+from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 import otf2
 
 TIMER_GRANULARITY = int(1e9)  # chrome traces uses micro seconds but has precision up to nanoseconds in TF2!
+
+
+@dataclass
+class Process:
+    name: str
+    group: otf2.definitions.LocationGroup
+    threads: Dict[int, otf2.definitions.Location] = field(default_factory=dict)
 
 
 def is_gzip_file(path):
@@ -64,8 +72,7 @@ class ChromeTrace2OTF2:
         if not self._trace_file:
             raise Exception("No chrome trace found")
 
-        # Process ID -> { 'threads' : { <Chrome Thread ID> : <OTF2 location object> }, 'name' : ..., 'location' : ... }
-        self._process_map = {}
+        self._process_map: Dict[int, Process] = {}
         self._function_map: Dict[str, otf2.definitions.Region] = {}
         self._metric_map: Dict[str, otf2.definitions.Metric] = {}
         self._dataflow_start = None
@@ -210,11 +217,11 @@ class ChromeTrace2OTF2:
             if event['name'] not in self._metric_map:
                 self.otf2_add_metric(otf2_trace, metric_name, 'Bytes')
 
-            if tid not in self._process_map[pid]['threads']:
+            if tid not in self._process_map[pid].threads:
                 self._otf2_add_thread(tid, pid, otf2_trace)
 
             metric_value = event['args']['Allocator Bytes in Use']
-            otf2_thread = self._process_map[pid]['threads'][tid]
+            otf2_thread = self._process_map[pid].threads[tid]
             otf2_thread.metric(self._convert_time_to_ticks(event['ts']), self._metric_map[metric_name], metric_value)
 
     def otf2_add_metric(self, otf2_trace: otf2.writer.Writer, name: str, unit: str) -> None:
@@ -242,7 +249,7 @@ class ChromeTrace2OTF2:
                     f"{event['args']['name']} {event['pid']}",
                 )
             assert (
-                tid not in self._process_map[event['pid']]['threads']
+                tid not in self._process_map[event['pid']].threads
             ), "The thread_name metadata event should be the very first event for that thread!"
             name = str(event['args']['name']) + str(" ") + str(event['tid'])
             self._otf2_add_thread(tid, event['pid'], otf2_trace, name)
@@ -253,14 +260,14 @@ class ChromeTrace2OTF2:
     def _handle_event(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
         pid = event['pid']
         tid = event['tid']
-        if tid not in self._process_map[pid]['threads']:
+        if tid not in self._process_map[pid].threads:
             self._otf2_add_thread(tid, pid, otf2_trace)
-            assert tid in self._process_map[pid]['threads']
+            assert tid in self._process_map[pid].threads
 
         if not event['name'] in self._function_map:
             self._otf2_add_function(event['name'], otf2_trace)
 
-        otf2_thread = self._process_map[pid]['threads'][tid]
+        otf2_thread = self._process_map[pid].threads[tid]
         otf2_function = self._function_map[event['name']]
 
         if 'dur' in event:
@@ -270,25 +277,28 @@ class ChromeTrace2OTF2:
 
     def _otf2_add_process(
         self,
-        pid: str,
+        pid: int,
         otf2_trace: otf2.writer.Writer,
         otf2_system_tree_node: otf2.definitions.SystemTreeNode,
         name: str,
     ) -> None:
+        process_name = name if name else str(pid)
         otf2_location_group = otf2_trace.definitions.location_group(
-            str(pid) if name is None else name, system_tree_parent=otf2_system_tree_node
+            process_name, system_tree_parent=otf2_system_tree_node
         )
 
-        if pid not in self._process_map:
-            self._process_map[pid] = {'threads': {}}
-
-        self._process_map[pid].update({'location': otf2_location_group, 'name': str(pid) if name is None else name})
+        if pid in self._process_map:
+            process = self._process_map[pid]
+            process.group = otf2_location_group
+            process.name = process_name
+        else:
+            self._process_map[pid] = Process(name=process_name, group=otf2_location_group)
 
     def _otf2_add_thread(self, tid: int, pid: int, otf2_trace: otf2.writer.Writer, name: Optional[str] = None) -> None:
         process = self._process_map[pid]
-        process['threads'][tid] = otf2_trace.event_writer(
-            str(process['name']) + str(tid) if name is None else name,
-            group=process['location'],
+        process.threads[tid] = otf2_trace.event_writer(
+            name if name else f"{process.name} {tid}",
+            group=process.group,
         )
 
     def _otf2_add_function(self, name: str, otf2_trace: otf2.writer.Writer) -> None:
