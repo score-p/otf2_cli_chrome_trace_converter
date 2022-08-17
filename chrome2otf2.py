@@ -238,9 +238,6 @@ class ChromeTrace2OTF2:
         elif 'name' in event and event['name'] == 'thread_name':
             pid = event['pid']
             tid = event['tid']
-            if pid == 0 and tid == 0:
-                # ignore events of system processes, e.g., swapper
-                return
             if pid not in self._process_map:
                 self._otf2_add_process(
                     pid,
