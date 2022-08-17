@@ -8,6 +8,8 @@ import json
 import os
 import shutil
 
+from typing import Dict, Optional
+
 import otf2
 
 TIMER_GRANULARITY = int(1e9)  # chrome traces uses micro seconds but has precision up to nanoseconds in TF2!
@@ -23,7 +25,7 @@ def is_gzip_file(path):
 
 
 class TensorFlowTrace2OTF2:
-    def __init__(self, input_path, memory_profile_path=None):
+    def __init__(self, input_path: str, memory_profile_path: Optional[str] = None) -> None:
         """
         input_path : A path to a folder containing a "<hostname>.memory_profile.json.gz" and
                      "<hostname>.trace.json.gz" or path to the latter directly.
@@ -37,7 +39,7 @@ class TensorFlowTrace2OTF2:
         if memory_profile_path and not os.path.exists(memory_profile_path):
             raise Exception("Specified memory profile location does not exist:", memory_profile_path)
 
-        self._trace_file = None
+        self._trace_file: Optional[str] = None
         self._memory_trace_file = memory_profile_path
 
         if os.path.isfile(input_path):
@@ -64,16 +66,18 @@ class TensorFlowTrace2OTF2:
 
         # Process ID -> { 'threads' : { <Chrome Thread ID> : <OTF2 location object> }, 'name' : ..., 'location' : ... }
         self._process_map = {}
-        self._function_map = {}
-        self._metric_map = {}
+        self._function_map: Dict[str, otf2.definitions.Region] = {}
+        self._metric_map: Dict[str, otf2.definitions.Metric] = {}
         self._dataflow_start = None
 
-        self._otf2_root_node = None
-        self._otf2_system_tree_host = None
+        self._otf2_root_node: Optional[otf2.definitions.SystemTreeNode] = None
+        self._otf2_system_tree_host: Optional[otf2.definitions.SystemTreeNode] = None
 
-    def convert_trace(self, output_dir):
+    def convert_trace(self, output_dir: str) -> None:
         if not output_dir:
             raise Exception("No output trace")
+        if not self._trace_file:
+            raise Exception("No input trace")
 
         with otf2.writer.open(output_dir, timer_resolution=TIMER_GRANULARITY) as otf2_trace:
             self._otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
@@ -92,7 +96,7 @@ class TensorFlowTrace2OTF2:
                     memory_data = json.load(json_file)
                     self._convert_memory_profile(memory_data, otf2_trace)
 
-    def _convert_event_trace(self, chrome_data, otf2_trace):
+    def _convert_event_trace(self, chrome_data: Dict, otf2_trace: otf2.writer.Writer) -> None:
         for chrome_event in chrome_data['traceEvents']:
             if not chrome_event:
                 # Trace might contain an empty event at the end for some reason
@@ -135,7 +139,7 @@ class TensorFlowTrace2OTF2:
             else:
                 print(f"Unknown timestamped event found: {chrome_event}")
 
-    def _convert_memory_profile(self, memory_data, otf2_trace):
+    def _convert_memory_profile(self, memory_data: Dict, otf2_trace: otf2.writer.Writer) -> None:
         otf2_location_group = otf2_trace.definitions.location_group(
             "TF Memory Allocators", system_tree_parent=self._otf2_system_tree_host
         )
@@ -193,12 +197,12 @@ class TensorFlowTrace2OTF2:
             location.leave(timestamp, region=last_leave)
 
     @staticmethod
-    def _convert_time_to_ticks(timestamp):
+    def _convert_time_to_ticks(timestamp: float) -> int:
         """Converts microseconds with 3 decimal places for nanoseconds to nanoseconds (integer)"""
         return int(timestamp * 1e3)
 
     # TODO Map newly created processes for only collecting one metric to process with same name
-    def _handle_metric(self, chrome_event, otf2_trace):
+    def _handle_metric(self, chrome_event: Dict, otf2_trace: otf2.writer.Writer):
         metric_name = chrome_event['name']
         cpid = chrome_event['pid']
         ctid = chrome_event['tid']
@@ -215,11 +219,13 @@ class TensorFlowTrace2OTF2:
                 self._convert_time_to_ticks(chrome_event['ts']), self._metric_map[metric_name], metric_value
             )
 
-    def otf2_add_metric(self, otf2_trace, name, unit):
+    def otf2_add_metric(self, otf2_trace: otf2.writer.Writer, name: str, unit: str) -> None:
         metric = otf2_trace.definitions.metric(name, unit=unit)
         self._metric_map[name] = metric
 
-    def _handle_metadata(self, chrome_event, otf2_system_tree_node, otf2_trace):
+    def _handle_metadata(
+        self, chrome_event, otf2_system_tree_node: otf2.definitions.SystemTreeNode, otf2_trace: otf2.writer.Writer
+    ) -> None:
         if 'name' in chrome_event and chrome_event['name'] == 'process_name':
             name = str(chrome_event['args']['name']) + str(" ") + str(chrome_event['pid'])
             self._otf2_add_process(chrome_event['pid'], otf2_trace, otf2_system_tree_node, name)
@@ -235,7 +241,7 @@ class TensorFlowTrace2OTF2:
                     cpid,
                     otf2_trace,
                     otf2_system_tree_node,
-                    name=chrome_event['args']['name'] + str(" ") + str(chrome_event['pid']),
+                    f"{chrome_event['args']['name']} {chrome_event['pid']}",
                 )
             assert (
                 ctid not in self._process_map[chrome_event['pid']]['threads']
@@ -246,7 +252,7 @@ class TensorFlowTrace2OTF2:
         else:
             print("Unknown metadata event:", chrome_event)
 
-    def _handle_event(self, chrome_event, otf2_trace):
+    def _handle_event(self, chrome_event: Dict, otf2_trace: otf2.writer.Writer) -> None:
         cpid = chrome_event['pid']
         ctid = chrome_event['tid']
         if ctid not in self._process_map[cpid]['threads']:
@@ -264,7 +270,13 @@ class TensorFlowTrace2OTF2:
         else:
             otf2_thread.enter(self._convert_time_to_ticks(chrome_event['ts']), otf2_function)
 
-    def _otf2_add_process(self, cpid, otf2_trace, otf2_system_tree_node, name=None):
+    def _otf2_add_process(
+        self,
+        cpid: str,
+        otf2_trace: otf2.writer.Writer,
+        otf2_system_tree_node: otf2.definitions.SystemTreeNode,
+        name: str,
+    ) -> None:
         otf2_location_group = otf2_trace.definitions.location_group(
             str(cpid) if name is None else name, system_tree_parent=otf2_system_tree_node
         )
@@ -274,18 +286,21 @@ class TensorFlowTrace2OTF2:
 
         self._process_map[cpid].update({'location': otf2_location_group, 'name': str(cpid) if name is None else name})
 
-    def _otf2_add_thread(self, ctid, cpid, otf2_trace, name=None):
-        self._process_map[cpid]['threads'][ctid] = otf2_trace.event_writer(
-            str(self._process_map[cpid]['name']) + str(ctid) if name is None else name,
-            group=self._process_map[cpid]['location'],
+    def _otf2_add_thread(
+        self, ctid: int, cpid: int, otf2_trace: otf2.writer.Writer, name: Optional[str] = None
+    ) -> None:
+        process = self._process_map[cpid]
+        process['threads'][ctid] = otf2_trace.event_writer(
+            str(process['name']) + str(ctid) if name is None else name,
+            group=process['location'],
         )
 
-    def _otf2_add_function(self, name, otf2_trace):
+    def _otf2_add_function(self, name: str, otf2_trace: otf2.writer.Writer) -> None:
         otf2_function = otf2_trace.definitions.region(name, paradigm=otf2.Paradigm.USER)
         self._function_map[name] = otf2_function
 
     # TODO implementation of dataflow
-    def _handle_dataflow(self, chrome_event):
+    def _handle_dataflow(self, chrome_event: Dict) -> None:
         if chrome_event['ph'] == 's':
             if self._dataflow_start is not None:
                 print(f"corrupted trace in dataflow: {chrome_event}")
