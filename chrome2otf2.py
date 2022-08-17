@@ -28,7 +28,7 @@ class Process:
 class DurationEvent:
     is_begin: bool
 
-    time: int
+    time: int  # ticks in TIMER_GRANULARITY
     pid: int
     tid: int
 
@@ -181,7 +181,7 @@ class ChromeTrace2OTF2:
             writer = self._get_location_writer(event.pid, event.tid, otf2_trace)
 
             write_event = writer.enter if event.is_begin else writer.leave
-            write_event(self._convert_time_to_ticks(event.time), otf2_function)
+            write_event(event.time, otf2_function)
 
     @staticmethod
     def _convert_duration_event(event: Dict) -> DurationEvent:
@@ -285,6 +285,7 @@ class ChromeTrace2OTF2:
         print("Unhandled deprecated event", event)
 
     def _handle_duration_begin_end(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        event['ts'] = ChromeTrace2OTF2._convert_time_to_ticks(int(event['ts']))
         self._duration_events.append(self._convert_duration_event(event))
 
     def _handle_complete(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
@@ -294,17 +295,25 @@ class ChromeTrace2OTF2:
         if 'ts' not in event:
             raise KeyError("Required ts is missing in the given event!")
 
-        # dur key is only optional but I've yet to see a case where it isn't set!
-        duration = int(event['dur']) if 'dur' in event else 0
-
         enter_event = copy.deepcopy(event)
         del enter_event['dur']
         enter_event['ph'] = 'B'
+        # Try to get more time precision from rocprof-specific data in args
+        if 'args' in event and 'BeginNs' in event['args']:
+            enter_event['ts'] = event['args']['BeginNs']
+        else:
+            enter_event['ts'] = ChromeTrace2OTF2._convert_time_to_ticks(int(event['ts']))
 
         leave_event = copy.deepcopy(event)
         del leave_event['dur']
         leave_event['ph'] = 'E'
-        leave_event['ts'] = int(event['ts']) + duration
+        # Try to get more time precision from rocprof-specific data in args
+        if 'args' in event and 'EndNs' in event['args']:
+            leave_event['ts'] = event['args']['EndNs']
+        else:
+            # dur key is only optional but I've yet to see a case where it isn't set.
+            duration = int(event['dur']) if 'dur' in event else 0
+            leave_event['ts'] = ChromeTrace2OTF2._convert_time_to_ticks(int(event['ts']) + duration)
 
         self._duration_events.append(self._convert_duration_event(enter_event))
         self._duration_events.append(self._convert_duration_event(leave_event))
