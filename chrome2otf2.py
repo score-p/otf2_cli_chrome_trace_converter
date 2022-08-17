@@ -97,47 +97,47 @@ class TensorFlowTrace2OTF2:
                     self._convert_memory_profile(memory_data, otf2_trace)
 
     def _convert_event_trace(self, chrome_data: Dict, otf2_trace: otf2.writer.Writer) -> None:
-        for chrome_event in chrome_data['traceEvents']:
-            if not chrome_event:
+        for event in chrome_data['traceEvents']:
+            if not event:
                 # Trace might contain an empty event at the end for some reason
                 pass
 
             # Metadata Events
-            elif chrome_event['ph'] == 'M':
-                self._handle_metadata(chrome_event, self._otf2_system_tree_host, otf2_trace)
+            elif event['ph'] == 'M':
+                self._handle_metadata(event, self._otf2_system_tree_host, otf2_trace)
 
             # Flow Events (start, step, end)
-            elif chrome_event['ph'] in ['s', 't', 'f']:
-                self._handle_dataflow(chrome_event)
+            elif event['ph'] in ['s', 't', 'f']:
+                self._handle_dataflow(event)
 
             # Counter Events
-            elif chrome_event['ph'] == 'C':
-                self._handle_metric(chrome_event, otf2_trace)
+            elif event['ph'] == 'C':
+                self._handle_metric(event, otf2_trace)
 
-            elif chrome_event['ph'] == 'X' and 'ts' in chrome_event and 'dur' in chrome_event:
+            elif event['ph'] == 'X' and 'ts' in event and 'dur' in event:
                 pass  # will be handled separately in order to sort enter leave events by time
 
             # Complete Events, TensorFlow seems to not use B and E events
             else:
-                print(f"Unknown event found: {chrome_event}")
+                print(f"Unknown event found: {event}")
 
         # Split all tracing events of the form 'ts', 'dur' into separate enter leave events.
         sorted_events = []
-        for chrome_event in chrome_data['traceEvents']:
-            if 'ts' in chrome_event and 'dur' in chrome_event and 'ph' in chrome_event and chrome_event['ph'] == 'X':
-                enter_event = copy.deepcopy(chrome_event)
+        for event in chrome_data['traceEvents']:
+            if 'ts' in event and 'dur' in event and 'ph' in event and event['ph'] == 'X':
+                enter_event = copy.deepcopy(event)
                 # The enter events will have the 'dur' key deleted to be recognized!
                 del enter_event['dur']
                 sorted_events.append(enter_event)
-                sorted_events.append(chrome_event)
+                sorted_events.append(event)
 
         sorted_events = sorted(sorted_events, key=lambda e: (e['ts'] + (e['dur'] if 'dur' in e else 0)))
-        for chrome_event in sorted_events:
-            if chrome_event['ph'] == 'X':
-                self._handle_event(chrome_event, otf2_trace)
+        for event in sorted_events:
+            if event['ph'] == 'X':
+                self._handle_event(event, otf2_trace)
 
             else:
-                print(f"Unknown timestamped event found: {chrome_event}")
+                print(f"Unknown timestamped event found: {event}")
 
     def _convert_memory_profile(self, memory_data: Dict, otf2_trace: otf2.writer.Writer) -> None:
         otf2_location_group = otf2_trace.definitions.location_group(
@@ -202,96 +202,92 @@ class TensorFlowTrace2OTF2:
         return int(timestamp * 1e3)
 
     # TODO Map newly created processes for only collecting one metric to process with same name
-    def _handle_metric(self, chrome_event: Dict, otf2_trace: otf2.writer.Writer):
-        metric_name = chrome_event['name']
-        cpid = chrome_event['pid']
-        ctid = chrome_event['tid']
+    def _handle_metric(self, event: Dict, otf2_trace: otf2.writer.Writer):
+        metric_name = event['name']
+        pid = event['pid']
+        tid = event['tid']
         if metric_name == 'Allocated Bytes':
-            if chrome_event['name'] not in self._metric_map:
+            if event['name'] not in self._metric_map:
                 self.otf2_add_metric(otf2_trace, metric_name, 'Bytes')
 
-            if ctid not in self._process_map[cpid]['threads']:
-                self._otf2_add_thread(ctid, cpid, otf2_trace)
+            if tid not in self._process_map[pid]['threads']:
+                self._otf2_add_thread(tid, pid, otf2_trace)
 
-            metric_value = chrome_event['args']['Allocator Bytes in Use']
-            otf2_thread = self._process_map[cpid]['threads'][ctid]
-            otf2_thread.metric(
-                self._convert_time_to_ticks(chrome_event['ts']), self._metric_map[metric_name], metric_value
-            )
+            metric_value = event['args']['Allocator Bytes in Use']
+            otf2_thread = self._process_map[pid]['threads'][tid]
+            otf2_thread.metric(self._convert_time_to_ticks(event['ts']), self._metric_map[metric_name], metric_value)
 
     def otf2_add_metric(self, otf2_trace: otf2.writer.Writer, name: str, unit: str) -> None:
         metric = otf2_trace.definitions.metric(name, unit=unit)
         self._metric_map[name] = metric
 
     def _handle_metadata(
-        self, chrome_event, otf2_system_tree_node: otf2.definitions.SystemTreeNode, otf2_trace: otf2.writer.Writer
+        self, event, otf2_system_tree_node: otf2.definitions.SystemTreeNode, otf2_trace: otf2.writer.Writer
     ) -> None:
-        if 'name' in chrome_event and chrome_event['name'] == 'process_name':
-            name = str(chrome_event['args']['name']) + str(" ") + str(chrome_event['pid'])
-            self._otf2_add_process(chrome_event['pid'], otf2_trace, otf2_system_tree_node, name)
+        if 'name' in event and event['name'] == 'process_name':
+            name = str(event['args']['name']) + str(" ") + str(event['pid'])
+            self._otf2_add_process(event['pid'], otf2_trace, otf2_system_tree_node, name)
 
-        elif 'name' in chrome_event and chrome_event['name'] == 'thread_name':
-            cpid = chrome_event['pid']
-            ctid = chrome_event['tid']
-            if cpid == 0 and ctid == 0:
+        elif 'name' in event and event['name'] == 'thread_name':
+            pid = event['pid']
+            tid = event['tid']
+            if pid == 0 and tid == 0:
                 # ignore events of system processes, e.g., swapper
                 return
-            if cpid not in self._process_map:
+            if pid not in self._process_map:
                 self._otf2_add_process(
-                    cpid,
+                    pid,
                     otf2_trace,
                     otf2_system_tree_node,
-                    f"{chrome_event['args']['name']} {chrome_event['pid']}",
+                    f"{event['args']['name']} {event['pid']}",
                 )
             assert (
-                ctid not in self._process_map[chrome_event['pid']]['threads']
+                tid not in self._process_map[event['pid']]['threads']
             ), "The thread_name metadata event should be the very first event for that thread!"
-            name = str(chrome_event['args']['name']) + str(" ") + str(chrome_event['tid'])
-            self._otf2_add_thread(ctid, chrome_event['pid'], otf2_trace, name)
+            name = str(event['args']['name']) + str(" ") + str(event['tid'])
+            self._otf2_add_thread(tid, event['pid'], otf2_trace, name)
 
         else:
-            print("Unknown metadata event:", chrome_event)
+            print("Unknown metadata event:", event)
 
-    def _handle_event(self, chrome_event: Dict, otf2_trace: otf2.writer.Writer) -> None:
-        cpid = chrome_event['pid']
-        ctid = chrome_event['tid']
-        if ctid not in self._process_map[cpid]['threads']:
-            self._otf2_add_thread(ctid, cpid, otf2_trace)
-            assert ctid in self._process_map[cpid]['threads']
+    def _handle_event(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        pid = event['pid']
+        tid = event['tid']
+        if tid not in self._process_map[pid]['threads']:
+            self._otf2_add_thread(tid, pid, otf2_trace)
+            assert tid in self._process_map[pid]['threads']
 
-        if not chrome_event['name'] in self._function_map:
-            self._otf2_add_function(chrome_event['name'], otf2_trace)
+        if not event['name'] in self._function_map:
+            self._otf2_add_function(event['name'], otf2_trace)
 
-        otf2_thread = self._process_map[cpid]['threads'][ctid]
-        otf2_function = self._function_map[chrome_event['name']]
+        otf2_thread = self._process_map[pid]['threads'][tid]
+        otf2_function = self._function_map[event['name']]
 
-        if 'dur' in chrome_event:
-            otf2_thread.leave(self._convert_time_to_ticks(chrome_event['ts'] + chrome_event['dur']), otf2_function)
+        if 'dur' in event:
+            otf2_thread.leave(self._convert_time_to_ticks(event['ts'] + event['dur']), otf2_function)
         else:
-            otf2_thread.enter(self._convert_time_to_ticks(chrome_event['ts']), otf2_function)
+            otf2_thread.enter(self._convert_time_to_ticks(event['ts']), otf2_function)
 
     def _otf2_add_process(
         self,
-        cpid: str,
+        pid: str,
         otf2_trace: otf2.writer.Writer,
         otf2_system_tree_node: otf2.definitions.SystemTreeNode,
         name: str,
     ) -> None:
         otf2_location_group = otf2_trace.definitions.location_group(
-            str(cpid) if name is None else name, system_tree_parent=otf2_system_tree_node
+            str(pid) if name is None else name, system_tree_parent=otf2_system_tree_node
         )
 
-        if cpid not in self._process_map:
-            self._process_map[cpid] = {'threads': {}}
+        if pid not in self._process_map:
+            self._process_map[pid] = {'threads': {}}
 
-        self._process_map[cpid].update({'location': otf2_location_group, 'name': str(cpid) if name is None else name})
+        self._process_map[pid].update({'location': otf2_location_group, 'name': str(pid) if name is None else name})
 
-    def _otf2_add_thread(
-        self, ctid: int, cpid: int, otf2_trace: otf2.writer.Writer, name: Optional[str] = None
-    ) -> None:
-        process = self._process_map[cpid]
-        process['threads'][ctid] = otf2_trace.event_writer(
-            str(process['name']) + str(ctid) if name is None else name,
+    def _otf2_add_thread(self, tid: int, pid: int, otf2_trace: otf2.writer.Writer, name: Optional[str] = None) -> None:
+        process = self._process_map[pid]
+        process['threads'][tid] = otf2_trace.event_writer(
+            str(process['name']) + str(tid) if name is None else name,
             group=process['location'],
         )
 
@@ -300,17 +296,17 @@ class TensorFlowTrace2OTF2:
         self._function_map[name] = otf2_function
 
     # TODO implementation of dataflow
-    def _handle_dataflow(self, chrome_event: Dict) -> None:
-        if chrome_event['ph'] == 's':
+    def _handle_dataflow(self, event: Dict) -> None:
+        if event['ph'] == 's':
             if self._dataflow_start is not None:
-                print(f"corrupted trace in dataflow: {chrome_event}")
+                print(f"corrupted trace in dataflow: {event}")
                 self._dataflow_start = None
-            self._dataflow_start = chrome_event['id']
+            self._dataflow_start = event['id']
             # dataflow handling
 
-        elif chrome_event['ph'] == 't':
-            if self._dataflow_start != chrome_event['id']:
-                print(f"corrupted trace in dataflow: {chrome_event}")
+        elif event['ph'] == 't':
+            if self._dataflow_start != event['id']:
+                print(f"corrupted trace in dataflow: {event}")
             # dataflow handling
 
             self._dataflow_start = None
