@@ -44,7 +44,7 @@ class TensorFlowTrace2OTF2:
         if os.path.isfile(input_path):
             self._trace_file = input_path
         elif os.path.isdir(input_path):
-            for root, dirs, files in os.walk(input_path):
+            for root, _, files in os.walk(input_path):
                 for filename in files:
                     if filename.endswith('.trace.json.gz') or filename.endswith('.trace.json'):
                         if self._trace_file is None:
@@ -69,6 +69,8 @@ class TensorFlowTrace2OTF2:
         self._metric_map = {}
         self._dataflow_start = None
 
+        self._otf2_root_node = None
+        self._otf2_system_tree_host = None
 
     def convert_trace(self, output_dir):
         if not output_dir:
@@ -78,14 +80,14 @@ class TensorFlowTrace2OTF2:
             self._otf2_root_node = otf2_trace.definitions.system_tree_node("root node")
             self._otf2_system_tree_host = otf2_trace.definitions.system_tree_node("myHost", parent=self._otf2_root_node)
 
-            with gzip.open(self._trace_file) if is_gzip_file(self._trace_file) \
-                 else open(self._trace_file) as json_file:
+            with gzip.open(self._trace_file, 'rb') if is_gzip_file(self._trace_file) \
+                 else open(self._trace_file, 'rb') as json_file:
                 chrome_data = json.load(json_file)
                 self._convert_event_trace(chrome_data, otf2_trace)
 
             if self._memory_trace_file:
-                with gzip.open(self._memory_trace_file) if is_gzip_file(self._memory_trace_file) \
-                     else open(self._memory_trace_file) as json_file:
+                with gzip.open(self._memory_trace_file, 'rb') if is_gzip_file(self._memory_trace_file) \
+                     else open(self._memory_trace_file, 'rb') as json_file:
                     memory_data = json.load(json_file)
                     self._convert_memory_profile(memory_data, otf2_trace)
 
@@ -113,7 +115,7 @@ class TensorFlowTrace2OTF2:
 
             # Complete Events, TensorFlow seems to not use B and E events
             else:
-                print("Unknown event found: {}".format(chrome_event))
+                print(f"Unknown event found: {chrome_event}")
 
         # Split all tracing events of the form 'ts', 'dur' into separate enter leave events.
         sorted_events = []
@@ -134,7 +136,7 @@ class TensorFlowTrace2OTF2:
                 self._handle_event(chrome_event, otf2_trace)
 
             else:
-                print("Unknown timestamped event found: {}".format(chrome_event))
+                print(f"Unknown timestamped event found: {chrome_event}")
 
 
     def _convert_memory_profile(self, memory_data, otf2_trace):
@@ -165,16 +167,16 @@ class TensorFlowTrace2OTF2:
 
                 for key, value in event_attributes.items():
                     if key not in otf2_attributes:
-                        type = otf2.Type.STRING
+                        attribute_type = otf2.Type.STRING
                         if key in uint_metadata:
                             value = int(value)
-                            type = otf2.Type.UINT64
+                            attribute_type = otf2.Type.UINT64
                         elif key is isinstance(value, int):
-                            type = otf2.Type.INT64
+                            attribute_type = otf2.Type.INT64
                         elif key is isinstance(value, float):
-                            type = otf2.Type.DOUBLE
+                            attribute_type = otf2.Type.DOUBLE
 
-                        otf2_attributes[key] = otf2_trace.definitions.attribute(name=key, type=type)
+                        otf2_attributes[key] = otf2_trace.definitions.attribute(name=key, type=attribute_type)
 
                     otf2_event_attributes[otf2_attributes[key]] = value
 
@@ -288,14 +290,14 @@ class TensorFlowTrace2OTF2:
     def _handle_dataflow(self, chrome_event):
         if chrome_event['ph'] == 's':
             if self._dataflow_start is not None:
-                print("corrupted trace in dataflow: {}".format(chrome_event))
+                print(f"corrupted trace in dataflow: {chrome_event}")
                 self._dataflow_start = None
             self._dataflow_start = chrome_event['id']
             # dataflow handling
 
         elif chrome_event['ph'] == 't':
             if self._dataflow_start != chrome_event['id']:
-                print("corrupted trace in dataflow: {}".format(chrome_event))
+                print(f"corrupted trace in dataflow: {chrome_event}")
             # dataflow handling
 
             self._dataflow_start = None
