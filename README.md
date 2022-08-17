@@ -9,6 +9,8 @@ Therefore, we only take care of features used by TensorFlow's traces at the mome
 This script requires the OTF2 Python bindings. These are installed with the OTF2 library. Bindings for Python 3 are included since OTF 2.3. If you install OTF2 to a custom location like `/opt`, you wil have to add the installed Python package to the `PYTHONPATH` like so:
 
 ```bash
+# The OTF2 configure step requires the 'six' module for the Python bindings
+python3 -m pip install --user six
 wget http://perftools.pages.jsc.fz-juelich.de/cicd/otf2/tags/otf2-2.3/otf2-2.3.tar.gz
 tar -xf otf2-2.3.tar.gz
 cd otf2-2.3
@@ -26,7 +28,7 @@ If not, it tells you which Python dependecies are missing. Continue with:
 ```bash
 make && make install
 
-export PYTHONPATH=$PYTHONPATH:$(/opt/otf2.3/otf2-config --pythonpath)
+export PYTHONPATH=$PYTHONPATH:$(/opt/otf2.3/bin/otf2-config --pythonpath)
 
 python3 -c 'import otf2; print(otf2.__version__)'  # 2.3
 ```

@@ -1,0 +1,4 @@
+[flake8]
+# W503 "line break before binary operator" is directly in opposition to how black breaks lines!
+extend-ignore = W503
+max-line-length = 120
