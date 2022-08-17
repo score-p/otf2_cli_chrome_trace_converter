@@ -212,21 +212,30 @@ class ChromeTrace2OTF2:
         """Converts microseconds with 3 decimal places for nanoseconds to nanoseconds (integer)"""
         return int(timestamp * 1e3)
 
+    def _get_location_writer(self, pid: int, tid: int, otf2_trace: otf2.writer.Writer) -> otf2.event_writer.EventWriter:
+        if pid not in self._process_map:
+            self._otf2_add_process(pid, otf2_trace, self._otf2_system_tree_host)
+
+        if tid not in self._process_map[pid].threads:
+            self._otf2_add_thread(tid, pid, otf2_trace)
+
+        return self._process_map[pid].threads[tid]
+
+    def _get_location_writer_from_event(
+        self, event: Dict, otf2_trace: otf2.writer.Writer
+    ) -> otf2.event_writer.EventWriter:
+        return self._get_location_writer(int(event['pid']), int(event['tid']), otf2_trace)
+
     # TODO Map newly created processes for only collecting one metric to process with same name
     def _handle_metric(self, event: Dict, otf2_trace: otf2.writer.Writer):
         metric_name = event['name']
-        pid = int(event['pid'])
-        tid = int(event['tid'])
         if metric_name == 'Allocated Bytes':
             if metric_name not in self._metric_map:
                 self.otf2_add_metric(otf2_trace, metric_name, 'Bytes')
 
-            if tid not in self._process_map[pid].threads:
-                self._otf2_add_thread(tid, pid, otf2_trace)
-
             metric_value = event['args']['Allocator Bytes in Use']
-            otf2_thread = self._process_map[pid].threads[tid]
-            otf2_thread.metric(self._convert_time_to_ticks(event['ts']), self._metric_map[metric_name], metric_value)
+            writer = self._get_location_writer_from_event(event, otf2_trace)
+            writer.metric(self._convert_time_to_ticks(event['ts']), self._metric_map[metric_name], metric_value)
 
     def otf2_add_metric(self, otf2_trace: otf2.writer.Writer, name: str, unit: str) -> None:
         metric = otf2_trace.definitions.metric(name, unit=unit)
@@ -259,30 +268,24 @@ class ChromeTrace2OTF2:
         else:
             print("Unknown metadata event:", event)
 
-    def _handle_event(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
-        pid = int(event['pid'])
-        tid = int(event['tid'])
-        if tid not in self._process_map[pid].threads:
-            self._otf2_add_thread(tid, pid, otf2_trace)
-            assert tid in self._process_map[pid].threads
-
+    def _handle_event(self, event: Dict, otf2_trace: otf2.writer.Writer):
         if not event['name'] in self._function_map:
             self._otf2_add_function(event['name'], otf2_trace)
 
-        otf2_thread = self._process_map[pid].threads[tid]
+        location_writer = self._get_location_writer_from_event(event, otf2_trace)
         otf2_function = self._function_map[event['name']]
 
         if 'dur' in event:
-            otf2_thread.leave(self._convert_time_to_ticks(event['ts'] + event['dur']), otf2_function)
+            location_writer.leave(self._convert_time_to_ticks(event['ts'] + event['dur']), otf2_function)
         else:
-            otf2_thread.enter(self._convert_time_to_ticks(event['ts']), otf2_function)
+            location_writer.enter(self._convert_time_to_ticks(event['ts']), otf2_function)
 
     def _otf2_add_process(
         self,
         pid: int,
         otf2_trace: otf2.writer.Writer,
         otf2_system_tree_node: otf2.definitions.SystemTreeNode,
-        name: str,
+        name: Optional[str] = None,
     ) -> None:
         process_name = name if name else str(pid)
         otf2_location_group = otf2_trace.definitions.location_group(
