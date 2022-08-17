@@ -7,9 +7,10 @@ import gzip
 import json
 import os
 import shutil
+import traceback
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import otf2
 
@@ -21,6 +22,20 @@ class Process:
     name: str
     group: otf2.definitions.LocationGroup
     threads: Dict[int, otf2.definitions.Location] = field(default_factory=dict)
+
+
+@dataclass
+class DurationEvent:
+    is_begin: bool
+
+    time: int
+    pid: int
+    tid: int
+
+    # These are optional in the chrome trace format, in which case they will be empty left empty
+    name: str
+    category: str
+    args: Dict[str, Any]
 
 
 def is_gzip_file(path):
@@ -80,6 +95,18 @@ class ChromeTrace2OTF2:
         self._otf2_root_node: Optional[otf2.definitions.SystemTreeNode] = None
         self._otf2_system_tree_host: Optional[otf2.definitions.SystemTreeNode] = None
 
+        self._phase_handlers: Dict[str, Callable[[Dict, otf2.writer.Writer], None]] = {
+            'B': self._handle_duration_begin_end,
+            'E': self._handle_duration_begin_end,
+            'X': self._handle_complete,
+            'C': self._handle_counter,
+            's': self._handle_flow_start,
+            't': self._handle_flow_step,
+            'M': self._handle_metadata,
+        }
+
+        self._duration_events: List[DurationEvent] = []
+
     def convert_trace(self, output_dir: str) -> None:
         if not output_dir:
             raise Exception("No output trace")
@@ -104,6 +131,7 @@ class ChromeTrace2OTF2:
                     self._convert_memory_profile(memory_data, otf2_trace)
 
     def _convert_event_trace(self, chrome_data: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        self._duration_events = []
         for event in chrome_data['traceEvents']:
             if not event:
                 # Trace might contain an empty event at the end for some reason
@@ -113,42 +141,47 @@ class ChromeTrace2OTF2:
                 if key in event:
                     event[key] = int(event[key])
 
-            # Metadata Events
-            if event['ph'] == 'M':
-                self._handle_metadata(event, self._otf2_system_tree_host, otf2_trace)
-
-            # Flow Events (start, step, end)
-            elif event['ph'] in ['s', 't', 'f']:
-                self._handle_dataflow(event)
-
-            # Counter Events
-            elif event['ph'] == 'C':
-                self._handle_metric(event, otf2_trace)
-
-            elif event['ph'] == 'X' and 'ts' in event and 'dur' in event:
-                pass  # will be handled separately in order to sort enter leave events by time
-
-            # Complete Events, TensorFlow seems to not use B and E events
+            phase = event['ph']
+            if phase in self._phase_handlers:
+                try:
+                    self._phase_handlers[phase](event, otf2_trace)
+                except Exception as exception:
+                    print("Trying to process event raised an exception:")
+                    print("    Event:", event)
+                    print("    Exception:", exception)
+                    traceback.print_exc()
             else:
                 print(f"Unknown event found: {event}")
 
-        # Split all tracing events of the form 'ts', 'dur' into separate enter leave events.
-        sorted_events = []
-        for event in chrome_data['traceEvents']:
-            if 'ts' in event and 'dur' in event and 'ph' in event and event['ph'] == 'X':
-                enter_event = copy.deepcopy(event)
-                # The enter events will have the 'dur' key deleted to be recognized!
-                del enter_event['dur']
-                sorted_events.append(enter_event)
-                sorted_events.append(event)
+        for event in sorted(self._duration_events, key=lambda e: e.time):
+            if event.name not in self._function_map:
+                self._otf2_add_function(event.name, otf2_trace)
+            otf2_function = self._function_map[event.name]
 
-        sorted_events = sorted(sorted_events, key=lambda e: (e['ts'] + (e['dur'] if 'dur' in e else 0)))
-        for event in sorted_events:
-            if event['ph'] == 'X':
-                self._handle_event(event, otf2_trace)
+            writer = self._get_location_writer(event.pid, event.tid, otf2_trace)
 
-            else:
-                print(f"Unknown timestamped event found: {event}")
+            write_event = writer.enter if event.is_begin else writer.leave
+            write_event(self._convert_time_to_ticks(event.time), otf2_function)
+
+    @staticmethod
+    def _convert_duration_event(event: Dict) -> DurationEvent:
+        if event['ph'] not in ['B', 'E']:
+            raise ValueError("May only be constructed from chrome trace duration events!")
+
+        for key in event.keys():
+            if key not in ['ph', 'ts', 'pid', 'tid', 'name', 'cat', 'args']:
+                print("Ignoring unknown event key:", key)
+
+        return DurationEvent(
+            is_begin=event['ph'] == 'B',
+            time=int(event['ts']),
+            pid=int(event['pid']),
+            tid=int(event['tid']),
+            # Optional arguments
+            name=event['name'] if 'name' in event else "",
+            category=event['cat'] if 'cat' in event else "",
+            args=event['args'] if 'args' in event else {},
+        )
 
     def _convert_memory_profile(self, memory_data: Dict, otf2_trace: otf2.writer.Writer) -> None:
         otf2_location_group = otf2_trace.definitions.location_group(
@@ -226,8 +259,33 @@ class ChromeTrace2OTF2:
     ) -> otf2.event_writer.EventWriter:
         return self._get_location_writer(int(event['pid']), int(event['tid']), otf2_trace)
 
+    def _handle_duration_begin_end(self, event: Dict, otf2_trace: otf2.writer.Writer):
+        self._duration_events.append(self._convert_duration_event(event))
+
+    def _handle_complete(self, event: Dict, otf2_trace: otf2.writer.Writer):
+        # Complete Events, TensorFlow seems to not use B and E events in an attempt to reduce the trace file size.
+        # Split these complete events into enter/leave events in order to sort them by timestamp.
+        # A special case might be X and B,E events being used in the same trace.
+        if 'ts' not in event:
+            raise KeyError("Required ts is missing in the given event!")
+
+        # dur key is only optional but I've yet to see a case where it isn't set!
+        duration = int(event['dur']) if 'dur' in event else 0
+
+        enter_event = copy.deepcopy(event)
+        del enter_event['dur']
+        enter_event['ph'] = 'B'
+
+        leave_event = copy.deepcopy(event)
+        del leave_event['dur']
+        leave_event['ph'] = 'E'
+        leave_event['ts'] = int(event['ts']) + duration
+
+        self._duration_events.append(self._convert_duration_event(enter_event))
+        self._duration_events.append(self._convert_duration_event(leave_event))
+
     # TODO Map newly created processes for only collecting one metric to process with same name
-    def _handle_metric(self, event: Dict, otf2_trace: otf2.writer.Writer):
+    def _handle_counter(self, event: Dict, otf2_trace: otf2.writer.Writer):
         metric_name = event['name']
         if metric_name == 'Allocated Bytes':
             if metric_name not in self._metric_map:
@@ -241,13 +299,11 @@ class ChromeTrace2OTF2:
         metric = otf2_trace.definitions.metric(name, unit=unit)
         self._metric_map[name] = metric
 
-    def _handle_metadata(
-        self, event, otf2_system_tree_node: otf2.definitions.SystemTreeNode, otf2_trace: otf2.writer.Writer
-    ) -> None:
+    def _handle_metadata(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
         if 'name' in event and event['name'] == 'process_name':
             pid = int(event['pid'])
             name = f"{event['args']['name']} {pid}"
-            self._otf2_add_process(pid, otf2_trace, otf2_system_tree_node, name)
+            self._otf2_add_process(pid, otf2_trace, self._otf2_system_tree_host, name)
 
         elif 'name' in event and event['name'] == 'thread_name':
             pid = int(event['pid'])
@@ -256,7 +312,7 @@ class ChromeTrace2OTF2:
                 self._otf2_add_process(
                     pid,
                     otf2_trace,
-                    otf2_system_tree_node,
+                    self._otf2_system_tree_host,
                     f"{event['args']['name']} {pid}",
                 )
             assert (
@@ -267,18 +323,6 @@ class ChromeTrace2OTF2:
 
         else:
             print("Unknown metadata event:", event)
-
-    def _handle_event(self, event: Dict, otf2_trace: otf2.writer.Writer):
-        if not event['name'] in self._function_map:
-            self._otf2_add_function(event['name'], otf2_trace)
-
-        location_writer = self._get_location_writer_from_event(event, otf2_trace)
-        otf2_function = self._function_map[event['name']]
-
-        if 'dur' in event:
-            location_writer.leave(self._convert_time_to_ticks(event['ts'] + event['dur']), otf2_function)
-        else:
-            location_writer.enter(self._convert_time_to_ticks(event['ts']), otf2_function)
 
     def _otf2_add_process(
         self,
@@ -311,20 +355,21 @@ class ChromeTrace2OTF2:
         self._function_map[name] = otf2_function
 
     # TODO implementation of dataflow
-    def _handle_dataflow(self, event: Dict) -> None:
-        if event['ph'] == 's':
-            if self._dataflow_start is not None:
-                print(f"corrupted trace in dataflow: {event}")
-                self._dataflow_start = None
-            self._dataflow_start = event['id']
-            # dataflow handling
-
-        elif event['ph'] == 't':
-            if self._dataflow_start != event['id']:
-                print(f"corrupted trace in dataflow: {event}")
-            # dataflow handling
-
+    def _handle_flow_start(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
+        if self._dataflow_start is not None:
+            print(f"corrupted trace in dataflow: {event}")
             self._dataflow_start = None
+        self._dataflow_start = event['id']
+
+        # TODO dataflow handling
+
+    def _handle_flow_step(self, event: Dict, otf2_trace: otf2.writer.Writer):
+        if self._dataflow_start != event['id']:
+            print(f"corrupted trace in dataflow: {event}")
+
+        # TODO dataflow handling
+
+        self._dataflow_start = None
 
 
 def cli():
