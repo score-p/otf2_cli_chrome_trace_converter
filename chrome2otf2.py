@@ -10,7 +10,7 @@ import shutil
 import traceback
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import otf2
 
@@ -18,10 +18,17 @@ TIMER_GRANULARITY = int(1e9)  # chrome traces uses micro seconds but has precisi
 
 
 @dataclass
+class Location:
+    name: str
+    writer: otf2.event_writer.EventWriter
+    location: otf2.definitions.Location
+
+
+@dataclass
 class Process:
     name: str
     group: otf2.definitions.LocationGroup
-    threads: Dict[int, otf2.definitions.Location] = field(default_factory=dict)
+    threads: Dict[int, Location] = field(default_factory=dict)
 
 
 @dataclass
@@ -36,6 +43,13 @@ class DurationEvent:
     name: str
     category: str
     args: Dict[str, Any]
+
+
+@dataclass
+class Communicator:
+    name: str
+    members: Set[otf2.definitions.Location]
+    communicator: otf2.definitions.Comm
 
 
 def is_gzip_file(path):
@@ -90,10 +104,12 @@ class ChromeTrace2OTF2:
         self._process_map: Dict[int, Process] = {}
         self._function_map: Dict[str, otf2.definitions.Region] = {}
         self._metric_map: Dict[str, otf2.definitions.Metric] = {}
-        self._dataflow_start = None
+        self._dataflow_start: Dict[str, Any] = {}
+        self._communicators: List[Communicator] = []
 
         self._otf2_root_node: Optional[otf2.definitions.SystemTreeNode] = None
         self._otf2_system_tree_host: Optional[otf2.definitions.SystemTreeNode] = None
+        self._otf2_comm_world: Optional[otf2.definitions.Group] = None
 
         self._phase_handlers: Dict[str, Callable[[Dict, otf2.writer.Writer], None]] = {
             'B': self._handle_duration_begin_end,
@@ -126,6 +142,8 @@ class ChromeTrace2OTF2:
         }
 
         self._duration_events: List[DurationEvent] = []
+        self._flow_events: List[Tuple[Dict, Dict]] = []
+        self._location_events: Dict[otf2.definitions.Location, List[otf2.events._Event]] = {}
 
     def convert_trace(self, output_dir: str) -> None:
         if not output_dir:
@@ -152,6 +170,7 @@ class ChromeTrace2OTF2:
 
     def _convert_event_trace(self, chrome_data: Dict, otf2_trace: otf2.writer.Writer) -> None:
         self._duration_events = []
+        self._flow_events = []
         for event in chrome_data['traceEvents']:
             if not event:
                 # Trace might contain an empty event at the end for some reason
@@ -178,10 +197,62 @@ class ChromeTrace2OTF2:
                 self._otf2_add_function(event.name, otf2_trace)
             otf2_function = self._function_map[event.name]
 
-            writer = self._get_location_writer(event.pid, event.tid, otf2_trace)
+            location = self._get_location(event.pid, event.tid, otf2_trace).location
 
-            write_event = writer.enter if event.is_begin else writer.leave
-            write_event(event.time, otf2_function)
+            self._location_events[location].append(
+                otf2.events.Enter(event.time, otf2_function)
+                if event.is_begin
+                else otf2.events.Leave(event.time, otf2_function)
+            )
+
+        # Collect all OTF2 locations participating in flow events and create a COMM_LOCATIONS group containing
+        # all of them for the paradigm.
+        paradigm_locations: Set[Tuple[int, int]] = set()
+        for send_event, receive_event in self._flow_events:
+            paradigm_locations.add((int(send_event['pid']), int(send_event['tid'])))
+            paradigm_locations.add((int(receive_event['pid']), int(receive_event['tid'])))
+        members = tuple((self._get_location(s, r, otf2_trace).location for s, r in paradigm_locations))
+        paradigm_group = otf2_trace.definitions.group(
+            "DataFlow (COMM_LOCATIONS)",
+            group_type=otf2.GroupType.COMM_LOCATIONS,
+            members=members,
+        )
+
+        for send_event, receive_event in self._flow_events:
+            send_location = self._get_location_from_event(send_event, otf2_trace)
+            recv_location = self._get_location_from_event(receive_event, otf2_trace)
+            communicator = self._get_communicator(
+                str(send_event['cat']),
+                paradigm_group,
+                set([send_location.location, recv_location.location]),
+                otf2_trace,
+            )
+            otf2_communicator = communicator.communicator
+
+            self._location_events[send_location.location].append(
+                otf2.events.MpiSend(
+                    self._convert_time_to_ticks(int(send_event['ts'])),
+                    otf2_communicator.rank(recv_location.location),
+                    otf2_communicator,
+                    int(send_event['id']),
+                    0,
+                )
+            )
+
+            self._location_events[recv_location.location].append(
+                otf2.events.MpiRecv(
+                    self._convert_time_to_ticks(int(receive_event['ts'])),
+                    otf2_communicator.rank(send_location.location),
+                    otf2_communicator,
+                    int(receive_event['id']),
+                    0,
+                )
+            )
+
+        for location, events in self._location_events.items():
+            writer = otf2_trace.event_writer_from_location(location)
+            for event in sorted(events, key=lambda e: e.time):
+                writer.write(event)
 
     @staticmethod
     def _convert_duration_event(event: Dict) -> DurationEvent:
@@ -224,7 +295,7 @@ class ChromeTrace2OTF2:
         last_leave = None
 
         for allocator_name, profile in memory_data['memoryProfilePerAllocator'].items():
-            location = otf2_trace.event_writer(allocator_name, group=otf2_location_group)
+            location_writer = otf2_trace.event_writer(allocator_name, group=otf2_location_group)
 
             for snapshot in profile['memoryProfileSnapshots']:
                 activity = snapshot['activityMetadata']['memoryActivity']
@@ -253,19 +324,19 @@ class ChromeTrace2OTF2:
 
                 timestamp = int(snapshot['timeOffsetPs']) // 1000  # Time is in picoseconds but precision is nanoseconds
                 if last_leave:  # Put the leave at the next enter in order to not create invisible metrics and regions
-                    location.leave(timestamp, region=last_leave)
-                location.enter(timestamp, memory_activities[activity], attributes=otf2_event_attributes)
+                    location_writer.leave(timestamp, region=last_leave)
+                location_writer.enter(timestamp, memory_activities[activity], attributes=otf2_event_attributes)
                 last_leave = memory_activities[activity]
 
         if last_leave:
-            location.leave(timestamp, region=last_leave)
+            location_writer.leave(timestamp, region=last_leave)
 
     @staticmethod
     def _convert_time_to_ticks(timestamp: float) -> int:
         """Converts microseconds with 3 decimal places for nanoseconds to nanoseconds (integer)"""
         return int(timestamp * 1e3)
 
-    def _get_location_writer(self, pid: int, tid: int, otf2_trace: otf2.writer.Writer) -> otf2.event_writer.EventWriter:
+    def _get_location(self, pid: int, tid: int, otf2_trace: otf2.writer.Writer) -> Location:
         if pid not in self._process_map:
             self._otf2_add_process(pid, otf2_trace, self._otf2_system_tree_host)
 
@@ -274,10 +345,27 @@ class ChromeTrace2OTF2:
 
         return self._process_map[pid].threads[tid]
 
-    def _get_location_writer_from_event(
-        self, event: Dict, otf2_trace: otf2.writer.Writer
-    ) -> otf2.event_writer.EventWriter:
-        return self._get_location_writer(int(event['pid']), int(event['tid']), otf2_trace)
+    def _get_location_from_event(self, event: Dict, otf2_trace: otf2.writer.Writer) -> Location:
+        return self._get_location(int(event['pid']), int(event['tid']), otf2_trace)
+
+    def _get_communicator(
+        self,
+        name: str,
+        paradigm_group: otf2.definitions.Group,
+        members: Set[otf2.definitions.Location],
+        otf2_trace: otf2.writer.Writer,
+    ) -> Communicator:
+        for communicator in self._communicators:
+            if communicator.name == name and communicator.members == members:
+                return communicator
+
+        ranks = tuple((paradigm_group.rank(location) for location in members))
+        communicator_group = otf2_trace.definitions.group(
+            name + " COMM_GROUP", group_type=otf2.GroupType.COMM_GROUP, members=ranks
+        )
+        communicator = otf2_trace.definitions.comm(name, communicator_group)
+        self._communicators.append(Communicator(name, members, communicator))
+        return self._communicators[-1]
 
     # Event handlers for every phase
 
@@ -332,7 +420,7 @@ class ChromeTrace2OTF2:
                 self.otf2_add_metric(otf2_trace, metric_name, 'Bytes')
 
             metric_value = event['args']['Allocator Bytes in Use']
-            writer = self._get_location_writer_from_event(event, otf2_trace)
+            writer = self._get_location_from_event(event, otf2_trace).writer
             writer.metric(self._convert_time_to_ticks(event['ts']), self._metric_map[metric_name], metric_value)
 
     def _handle_async_nestable_start(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
@@ -346,20 +434,26 @@ class ChromeTrace2OTF2:
 
     # TODO implementation of dataflow
     def _handle_flow_start(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
-        if self._dataflow_start is not None:
-            print(f"corrupted trace in dataflow: {event}")
-            self._dataflow_start = None
-        self._dataflow_start = event['id']
+        # The (category, scope (optional), id) triple identifies an event tree of corresponding flow events.
+        if 'ts' not in event:
+            print("Expected the flow event to have a timestamp.")
+            return
 
-        # TODO dataflow handling
+        if 'scope' in event:
+            print("Flow events with scope are not yet supported.")
+            return
+
+        if self._dataflow_start:
+            print(f"Unsupported dataflow event usage in trace: {event}")
+            self._dataflow_start = {}
+        self._dataflow_start = event
 
     def _handle_flow_step(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
-        if self._dataflow_start != event['id']:
-            print(f"corrupted trace in dataflow: {event}")
+        if 'id' not in self._dataflow_start or self._dataflow_start['id'] != event['id']:
+            print(f"Unsupported dataflow event usage in trace: {event}")
 
-        # TODO dataflow handling
-
-        self._dataflow_start = None
+        self._flow_events.append((self._dataflow_start, event))
+        self._dataflow_start = {}
 
     def _handle_flow_end(self, event: Dict, otf2_trace: otf2.writer.Writer) -> None:
         print("Unhandled event", event)
@@ -457,10 +551,17 @@ class ChromeTrace2OTF2:
 
     def _otf2_add_thread(self, tid: int, pid: int, otf2_trace: otf2.writer.Writer, name: Optional[str] = None) -> None:
         process = self._process_map[pid]
-        process.threads[tid] = otf2_trace.event_writer(
-            name if name else f"{process.name} {tid}",
-            group=process.group,
+        thread_name = name if name else f"{process.name} {tid}"
+
+        location = Location(
+            thread_name,
+            otf2_trace.event_writer(thread_name, group=process.group),
+            otf2_trace.definitions.location(thread_name, group=process.group),
         )
+
+        process.threads[tid] = location
+        if location.location not in self._location_events:
+            self._location_events[location.location] = []
 
     def _otf2_add_function(self, name: str, otf2_trace: otf2.writer.Writer) -> None:
         otf2_function = otf2_trace.definitions.region(name, paradigm=otf2.Paradigm.USER)
