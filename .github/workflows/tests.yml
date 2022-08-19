@@ -57,3 +57,6 @@ jobs:
 
     - name: Lint With Mypy
       run: mypy $( git ls-files '*.py' )
+
+    - name: Run Tests
+      run: pytest $( git ls-files 'test_*.py' )
