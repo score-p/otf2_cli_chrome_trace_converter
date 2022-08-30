@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+    branches: '**'
+  pull_request:
+
+jobs:
+  Static-Code-Checks:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.10'
+
+    - name: Install System Dependencies
+      run: |
+        # The OTF2 configure step requires the 'six' module for the Python bindings
+        python3 -m pip install --user six
+        wget -O- http://perftools.pages.jsc.fz-juelich.de/cicd/otf2/tags/otf2-3.0/otf2-3.0.tar.gz | tar -xz
+        cd otf2-*
+        prefix=$PWD/otf2
+        ./configure --prefix=$prefix && make -j $( nproc ) && make install
+        echo "PYTHONPATH=$PYTHONPATH:$( $prefix/bin/otf2-config --pythonpath )" >> $GITHUB_ENV
+
+    - name: Install pip Dependencies
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install --user black flake8 pylint pytype mypy
+
+    - name: Style Check With Black
+      run: |
+        black -q --diff --line-length 120 --skip-string-normalization $( git ls-files '*.py' ) > black.diff
+        if [ -s black.diff ]; then
+            cat black.diff
+            exit 123
+        fi
+
+    - name: Lint With Flake8
+      run: flake8 $( git ls-files '*.py' )
+
+    - name: Lint With Pylint
+      run: |
+        pylint $( git ls-files '*.py' ) | tee pylint.log || true
+        ! 'egrep' ': E[0-9]{4}: ' pylint.log
+
+    - name: Lint With Pytype
+      run: pytype -P$( cd core && pwd ):$( pwd ) $( git ls-files '*.py' )
+
+    - name: Lint With Mypy
+      run: mypy $( git ls-files '*.py' )
+
+    - name: Run Tests
+      run: pytest $( git ls-files 'test_*.py' )
