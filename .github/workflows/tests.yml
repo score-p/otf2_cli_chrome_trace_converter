@@ -34,7 +34,7 @@ jobs:
     - name: Install pip Dependencies
       run: |
         python3 -m pip install --upgrade pip
-        python3 -m pip install --user black flake8 pylint pytype mypy
+        python3 -m pip install --user black flake8 pylint pytest pytype mypy
 
     - name: Style Check With Black
       run: |
